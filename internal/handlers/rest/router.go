@@ -31,7 +31,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(Metrics(deps.Metrics))
 	r.Use(middleware.Timeout(deps.Config.App.RequestTimeout))
 
-	health := NewHealthHandler(deps.Log, deps.Config.App.Version, healthTimeout, deps.Checkers...)
+	health := NewHealthHandler(deps.Log, deps.Config.App.Version, healthTimeout, !deps.Config.IsProd(), deps.Checkers...)
 	r.Get("/health", health.Handle)
 	r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
 

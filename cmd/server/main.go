@@ -14,6 +14,7 @@ import (
 	"go-avatar-service/internal/handlers/rest"
 	"go-avatar-service/internal/logger"
 	"go-avatar-service/internal/observability"
+	"go-avatar-service/internal/repository/postgres"
 )
 
 const (
@@ -45,12 +46,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	pool, err := postgres.NewPool(ctx, cfg.DB)
+	if err != nil {
+		return fmt.Errorf("postgres: %w", err)
+	}
+	defer pool.Close()
+
+	log.InfoContext(ctx, "подключение к базе установлено", "dsn", cfg.DB.Redacted())
+
+	if err = postgres.Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+
 	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:   cfg,
 		Log:      log,
 		Metrics:  observability.NewHTTP(registry),
 		Registry: registry,
+		Checkers: []rest.Checker{postgres.NewHealthChecker(pool)},
 	})
 
 	srv := &http.Server{

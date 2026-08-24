@@ -25,6 +25,8 @@ type componentHealth struct {
 	Status    string `json:"status"`
 	LatencyMS int64  `json:"latency_ms"`
 	Error     string `json:"error,omitempty"`
+
+	detail string
 }
 
 type healthResponse struct {
@@ -36,20 +38,24 @@ type healthResponse struct {
 
 type HealthHandler struct {
 	responder
-	checkers []Checker
-	version  string
-	timeout  time.Duration
-	started  time.Time
+	checkers    []Checker
+	version     string
+	timeout     time.Duration
+	started     time.Time
+	exposeError bool
 }
 
 // NewHealthHandler создаёт обработчик проверки работоспособности сервиса.
-func NewHealthHandler(log *slog.Logger, version string, timeout time.Duration, checkers ...Checker) *HealthHandler {
+// Причина отказа компонента попадает в ответ только при exposeError: текст ошибки
+// подключения раскрывает адреса и учётные записи инфраструктуры.
+func NewHealthHandler(log *slog.Logger, version string, timeout time.Duration, exposeError bool, checkers ...Checker) *HealthHandler {
 	return &HealthHandler{
-		responder: responder{log: log},
-		checkers:  checkers,
-		version:   version,
-		timeout:   timeout,
-		started:   time.Now(),
+		responder:   responder{log: log},
+		checkers:    checkers,
+		version:     version,
+		timeout:     timeout,
+		started:     time.Now(),
+		exposeError: exposeError,
 	}
 }
 
@@ -65,7 +71,7 @@ func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = probe(ctx, c)
+			results[i] = probe(ctx, c, h.exposeError)
 		}()
 	}
 	wg.Wait()
@@ -83,13 +89,15 @@ func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if results[i].Status != statusOK {
 			resp.Status = statusDown
 			code = http.StatusServiceUnavailable
+
+			h.log.ErrorContext(ctx, "компонент недоступен", "component", c.Name(), "err", results[i].detail)
 		}
 	}
 
 	h.JSON(ctx, w, code, resp)
 }
 
-func probe(ctx context.Context, c Checker) componentHealth {
+func probe(ctx context.Context, c Checker, exposeError bool) componentHealth {
 	started := time.Now()
 	err := c.Check(ctx)
 	health := componentHealth{
@@ -99,7 +107,11 @@ func probe(ctx context.Context, c Checker) componentHealth {
 
 	if err != nil {
 		health.Status = statusDown
-		health.Error = err.Error()
+		health.detail = err.Error()
+		health.Error = "component unavailable"
+		if exposeError {
+			health.Error = health.detail
+		}
 	}
 
 	return health
