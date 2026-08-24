@@ -15,6 +15,7 @@ import (
 	"go-avatar-service/internal/logger"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/repository/postgres"
+	"go-avatar-service/internal/repository/s3"
 )
 
 const (
@@ -58,13 +59,20 @@ func run() error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
+	storage, err := s3.NewStorage(ctx, cfg.S3)
+	if err != nil {
+		return fmt.Errorf("s3: %w", err)
+	}
+
+	log.InfoContext(ctx, "хранилище готово", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket)
+
 	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:   cfg,
 		Log:      log,
 		Metrics:  observability.NewHTTP(registry),
 		Registry: registry,
-		Checkers: []rest.Checker{postgres.NewHealthChecker(pool)},
+		Checkers: []rest.Checker{postgres.NewHealthChecker(pool), s3.NewHealthChecker(storage)},
 	})
 
 	srv := &http.Server{
