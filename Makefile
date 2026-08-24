@@ -7,7 +7,7 @@ MIGRATIONS  := ./migrations
 DB_DSN      ?= postgres://avatars:avatars@localhost:5432/avatars?sslmode=disable
 
 .DEFAULT_GOAL := help
-.PHONY: help run-server run-worker build up down logs ps lint lint-fix fmt tidy test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
+.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
 
 help: ## Показать список команд
 	grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -27,17 +27,26 @@ build: ## Собрать оба бинаря в ./bin
 
 ## --- Окружение ---
 
-up: ## Поднять postgres, rabbitmq, minio (docker compose)
+up: ## Поднять инфраструктуру: postgres, minio, rabbitmq
 	$(COMPOSE) up -d
 
-down: ## Остановить окружение
-	$(COMPOSE) down
+up-all: ## Поднять всё, включая server и worker в контейнерах
+	$(COMPOSE) --profile app up -d --build
+
+down: ## Остановить окружение (данные сохраняются)
+	$(COMPOSE) --profile app down
+
+down-v: ## Остановить окружение и удалить тома с данными
+	$(COMPOSE) --profile app down -v
 
 logs: ## Логи окружения (Ctrl+C для выхода)
-	$(COMPOSE) logs -f
+	$(COMPOSE) --profile app logs -f
 
 ps: ## Статус контейнеров
-	$(COMPOSE) ps
+	$(COMPOSE) --profile app ps
+
+image: ## Собрать образ приложения
+	docker build -f docker/Dockerfile -t gophprofile:dev .
 
 ## --- Качество ---
 
