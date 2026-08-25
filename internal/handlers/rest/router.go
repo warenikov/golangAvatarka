@@ -18,6 +18,7 @@ type RouterDeps struct {
 	Log      *slog.Logger
 	Metrics  *observability.HTTP
 	Registry *prometheus.Registry
+	Avatars  *AvatarHandler
 	Checkers []Checker
 }
 
@@ -34,6 +35,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 	health := NewHealthHandler(deps.Log, deps.Config.App.Version, healthTimeout, !deps.Config.IsProd(), deps.Checkers...)
 	r.Get("/health", health.Handle)
 	r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
+
+	r.Route("/api/v1", func(api chi.Router) {
+		api.Post("/avatars", deps.Avatars.Upload)
+		api.Get("/avatars/{avatar_id}", deps.Avatars.Get)
+		api.Get("/avatars/{avatar_id}/metadata", deps.Avatars.Metadata)
+		api.Delete("/avatars/{avatar_id}", deps.Avatars.Delete)
+
+		api.Get("/users/{user_id}/avatar", deps.Avatars.GetCurrent)
+		api.Get("/users/{user_id}/avatars", deps.Avatars.List)
+		api.Delete("/users/{user_id}/avatar", deps.Avatars.DeleteCurrent)
+	})
 
 	return r
 }

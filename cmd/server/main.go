@@ -10,12 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"go-avatar-service/internal/broker"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
 	"go-avatar-service/internal/logger"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/repository/postgres"
 	"go-avatar-service/internal/repository/s3"
+	"go-avatar-service/internal/services"
 )
 
 const (
@@ -66,12 +68,17 @@ func run() error {
 
 	log.InfoContext(ctx, "хранилище готово", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket)
 
+	repo := postgres.NewAvatarRepository(pool)
+	publisher := broker.NewNoopPublisher(log)
+	avatarSvc := services.NewAvatarService(repo, storage, publisher, log)
+
 	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:   cfg,
 		Log:      log,
 		Metrics:  observability.NewHTTP(registry),
 		Registry: registry,
+		Avatars:  rest.NewAvatarHandler(avatarSvc, cfg, log),
 		Checkers: []rest.Checker{postgres.NewHealthChecker(pool), s3.NewHealthChecker(storage)},
 	})
 
