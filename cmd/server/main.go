@@ -13,6 +13,7 @@ import (
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
+	webui "go-avatar-service/internal/handlers/web"
 	"go-avatar-service/internal/logger"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/repository/postgres"
@@ -94,7 +95,8 @@ func run() error {
 		Log:      log,
 		Metrics:  observability.NewHTTP(registry),
 		Registry: registry,
-		Avatars:  rest.NewAvatarHandler(avatarSvc, cfg, log),
+		Avatars:  rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
+		Web:      webui.NewHandler(avatarSvc, cfg, log.With("component", "web")),
 		Checkers: []rest.Checker{
 			postgres.NewHealthChecker(pool),
 			s3.NewHealthChecker(storage),

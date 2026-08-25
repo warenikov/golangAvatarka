@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"go-avatar-service/internal/config"
+	webui "go-avatar-service/internal/handlers/web"
 	"go-avatar-service/internal/observability"
 )
 
@@ -19,6 +20,7 @@ type RouterDeps struct {
 	Metrics  *observability.HTTP
 	Registry *prometheus.Registry
 	Avatars  *AvatarHandler
+	Web      *webui.Handler
 	Checkers []Checker
 }
 
@@ -45,6 +47,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 		api.Get("/users/{user_id}/avatar", deps.Avatars.GetCurrent)
 		api.Get("/users/{user_id}/avatars", deps.Avatars.List)
 		api.Delete("/users/{user_id}/avatar", deps.Avatars.DeleteCurrent)
+	})
+
+	r.Route("/web", deps.Web.Routes)
+	r.Handle("/static/*", webui.StaticHandler())
+
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/upload", http.StatusFound)
 	})
 
 	return r

@@ -1,0 +1,9 @@
+{{define "title"}}Ошибка {{.Status}}{{end}}
+
+{{define "content"}}
+<div class="bg-red-500/20 border border-red-500/50 text-red-200 px-4 py-3 rounded-lg space-y-1">
+  <p class="font-semibold">{{.Message}}</p>
+  {{with .Details}}<p class="text-sm text-red-200/80">{{.}}</p>{{end}}
+</div>
+<a href="/web/upload" class="block text-center text-white/70 underline hover:text-white">На страницу загрузки</a>
+{{end}}
