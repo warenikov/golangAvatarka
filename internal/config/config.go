@@ -20,6 +20,8 @@ const (
 
 	devDBPassword  = "avatars"
 	devS3SecretKey = "minioadmin"
+
+	maxRetryTTL = 24 * time.Hour
 )
 
 type Config struct {
@@ -130,6 +132,13 @@ func (c *Config) Validate() error {
 	}
 	if _, err := url.Parse(c.RabbitMQ.URL); err != nil {
 		errs = append(errs, fmt.Errorf("RABBITMQ_URL: %w", err))
+	}
+	if c.RabbitMQ.RetryTTL <= 0 || c.RabbitMQ.RetryTTL > maxRetryTTL {
+		errs = append(errs, fmt.Errorf("RABBITMQ_RETRY_TTL: ожидается от 1s до %s, получено %s",
+			maxRetryTTL, c.RabbitMQ.RetryTTL))
+	}
+	if c.RabbitMQ.MaxRetries < 1 {
+		errs = append(errs, fmt.Errorf("RABBITMQ_MAX_RETRIES: ожидается положительное число, получено %d", c.RabbitMQ.MaxRetries))
 	}
 	if c.RabbitMQ.Prefetch < 1 {
 		errs = append(errs, fmt.Errorf("RABBITMQ_PREFETCH: ожидается положительное число, получено %d", c.RabbitMQ.Prefetch))

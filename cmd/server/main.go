@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"go-avatar-service/internal/broker"
+	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
 	"go-avatar-service/internal/logger"
@@ -68,8 +68,24 @@ func run() error {
 
 	log.InfoContext(ctx, "хранилище готово", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket)
 
+	conn, err := rabbitmq.Connect(ctx, cfg.RabbitMQ, log)
+	if err != nil {
+		return fmt.Errorf("rabbitmq: %w", err)
+	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Error("не удалось закрыть соединение с брокером", "err", closeErr)
+		}
+	}()
+
+	publisher, err := rabbitmq.NewPublisher(conn)
+	if err != nil {
+		return fmt.Errorf("rabbitmq publisher: %w", err)
+	}
+
+	log.InfoContext(ctx, "брокер подключён", "exchange", cfg.RabbitMQ.Exchange)
+
 	repo := postgres.NewAvatarRepository(pool)
-	publisher := broker.NewNoopPublisher(log)
 	avatarSvc := services.NewAvatarService(repo, storage, publisher, log)
 
 	registry := observability.NewRegistry()
@@ -79,7 +95,11 @@ func run() error {
 		Metrics:  observability.NewHTTP(registry),
 		Registry: registry,
 		Avatars:  rest.NewAvatarHandler(avatarSvc, cfg, log),
-		Checkers: []rest.Checker{postgres.NewHealthChecker(pool), s3.NewHealthChecker(storage)},
+		Checkers: []rest.Checker{
+			postgres.NewHealthChecker(pool),
+			s3.NewHealthChecker(storage),
+			rabbitmq.NewHealthChecker(conn),
+		},
 	})
 
 	srv := &http.Server{
