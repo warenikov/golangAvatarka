@@ -24,6 +24,8 @@ func validConfig() *config.Config {
 	cfg.App.MaxImagePixels = 50_000_000
 	cfg.App.AllowedMIME = []string{"image/jpeg", "image/png"}
 	cfg.App.CORSOrigins = []string{"http://localhost:8080"}
+	cfg.App.RateLimitRPM = 300
+	cfg.App.RateLimitUpload = 10
 	cfg.DB.Port = 5432
 	cfg.DB.MinConns = 2
 	cfg.DB.MaxConns = 10
@@ -75,6 +77,11 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, int64(10485760), cfg.App.MaxUploadBytes)
 	assert.Equal(t, []string{"image/jpeg", "image/png", "image/webp"}, cfg.App.AllowedMIME)
 	assert.Equal(t, 5432, cfg.DB.Port)
+	assert.Equal(t, 300, cfg.App.RateLimitRPM)
+	assert.Equal(t, 10, cfg.App.RateLimitUpload,
+		"загрузка дороже чтения и ограничивается строже")
+	assert.Equal(t, []string{"http://localhost:8080"}, cfg.App.CORSOrigins,
+		"по умолчанию — явный origin, не wildcard")
 	assert.Equal(t, "avatars", cfg.S3.Bucket)
 	assert.Equal(t, 30*time.Second, cfg.RabbitMQ.RetryTTL)
 	assert.Equal(t, time.Minute, cfg.Worker.ReconcileInterval)
@@ -133,6 +140,14 @@ func TestValidate(t *testing.T) {
 		{"нулевой лимит загрузки", func(c *config.Config) { c.App.MaxUploadBytes = 0 }, "APP_MAX_UPLOAD_BYTES"},
 		{"отрицательный лимит пикселей", func(c *config.Config) { c.App.MaxImagePixels = -1 }, "APP_MAX_IMAGE_PIXELS"},
 		{"пустой список MIME", func(c *config.Config) { c.App.AllowedMIME = nil }, "APP_ALLOWED_MIME"},
+		{"нулевой лимит запросов", func(c *config.Config) { c.App.RateLimitRPM = 0 }, "APP_RATE_LIMIT_RPM"},
+		{"нулевой лимит загрузок", func(c *config.Config) { c.App.RateLimitUpload = 0 }, "APP_RATE_LIMIT_UPLOAD_RPM"},
+		{
+			name:    "лимит загрузок выше общего",
+			mutate:  func(c *config.Config) { c.App.RateLimitUpload = 500 },
+			wantErr: "больше общего лимита",
+		},
+		{"пустой список CORS", func(c *config.Config) { c.App.CORSOrigins = nil }, "APP_CORS_ORIGINS"},
 		{"порт вне диапазона", func(c *config.Config) { c.DB.Port = 70000 }, "DB_PORT"},
 		{"min больше max", func(c *config.Config) { c.DB.MinConns = 20 }, "DB_MIN_CONNS"},
 		{"пустой бакет", func(c *config.Config) { c.S3.Bucket = "" }, "S3_BUCKET"},
