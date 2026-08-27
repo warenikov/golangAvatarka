@@ -1,6 +1,9 @@
 package config_test
 
 import (
+	"net/url"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +38,35 @@ func validConfig() *config.Config {
 	return cfg
 }
 
+// isolateEnv убирает из окружения все переменные сервиса на время теста.
+//
+// config.Load читает настоящее окружение, а docker-compose задаёт APP_ENV,
+// DB_PORT и другие переменные для контейнеров приложения: без изоляции
+// `go test ./...` внутри образа падал на несовпадении с ожидаемыми значениями.
+func isolateEnv(t *testing.T) {
+	t.Helper()
+
+	prefixes := []string{"APP_", "DB_", "S3_", "RABBITMQ_", "WORKER_"}
+
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+
+		if !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(name, p) }) {
+			continue
+		}
+
+		require.NoError(t, os.Unsetenv(name))
+
+		t.Cleanup(func() { _ = os.Setenv(name, value) })
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
+	isolateEnv(t)
+
 	cfg, err := config.Load()
 	require.NoError(t, err)
 
@@ -51,6 +82,8 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadFromEnv(t *testing.T) {
+	isolateEnv(t)
+
 	t.Setenv("APP_HTTP_ADDR", ":9999")
 	t.Setenv("APP_LOG_LEVEL", "debug")
 	t.Setenv("APP_ALLOWED_MIME", "image/png,image/webp")
@@ -68,6 +101,8 @@ func TestLoadFromEnv(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
+	isolateEnv(t)
+
 	t.Setenv("APP_ENV", "staging")
 
 	_, err := config.Load()
@@ -76,6 +111,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 }
 
 func TestLoadRejectsUnparsableValues(t *testing.T) {
+	isolateEnv(t)
+
 	t.Setenv("DB_PORT", "не число")
 
 	_, err := config.Load()
@@ -175,11 +212,70 @@ func TestDBDSN(t *testing.T) {
 		Password: "p@ss word/1", Name: "avatars", SSLMode: "require",
 	}
 
-	assert.Equal(t, "postgres://avatars:p%40ss+word%2F1@db.internal:5432/avatars?sslmode=require", db.DSN())
+	assert.Equal(t, "postgres://avatars:p%40ss%20word%2F1@db.internal:5432/avatars?sslmode=require", db.DSN())
+}
+
+// Главное свойство DSN — пароль должен дойти до драйвера ровно таким, каким
+// его задали. Раньше пробел кодировался как "+", и в userinfo это литеральный
+// плюс: pgx отвечал "password authentication failed" без единой подсказки.
+func TestDBDSNRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{"обычный", "avatars"},
+		{"с пробелом", "p@ss word/1"},
+		{"со спецсимволами", "p:a?s#s&w=o/rd"},
+		{"кириллица", "па$$ворд"},
+		{"пустой", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := config.DB{
+				Host: "db.internal", Port: 5432, User: "avatars",
+				Password: tt.password, Name: "avatars", SSLMode: "require",
+			}
+
+			u, err := url.Parse(db.DSN())
+			require.NoError(t, err)
+
+			assert.Equal(t, "avatars", u.User.Username())
+
+			got, _ := u.User.Password()
+			assert.Equal(t, tt.password, got, "пароль должен переживать разбор адреса обратно")
+
+			assert.Equal(t, "db.internal:5432", u.Host)
+			assert.Equal(t, "/avatars", u.Path)
+			assert.Equal(t, "require", u.Query().Get("sslmode"))
+		})
+	}
+}
+
+// Хост из конфига может оказаться IPv6-адресом; без скобок адрес разобрать нельзя.
+func TestDBDSNIPv6Host(t *testing.T) {
+	db := config.DB{Host: "::1", Port: 5432, User: "avatars", Password: "x", Name: "avatars", SSLMode: "disable"}
+
+	u, err := url.Parse(db.DSN())
+	require.NoError(t, err)
+
+	assert.Equal(t, "[::1]:5432", u.Host)
+	assert.Equal(t, "::1", u.Hostname())
+	assert.Equal(t, "5432", u.Port())
+}
+
+func TestDBRedacted(t *testing.T) {
+	db := config.DB{
+		Host: "db.internal", Port: 5432, User: "avatars",
+		Password: "p@ss word/1", Name: "avatars", SSLMode: "require",
+	}
 
 	redacted := db.Redacted()
-	assert.Equal(t, "postgres://avatars:***@db.internal:5432/avatars?sslmode=require", redacted)
+
 	assert.NotContains(t, redacted, "p@ss", "пароль не должен попадать в логи")
+	assert.NotContains(t, redacted, "word", "пароль не должен попадать в логи")
+	assert.Equal(t, "postgres://avatars:xxxxx@db.internal:5432/avatars?sslmode=require", redacted,
+		"маскировка — штатная url.URL.Redacted из stdlib")
 }
 
 func TestAllowedMIMESet(t *testing.T) {
@@ -204,7 +300,7 @@ func TestAllowedMIMESet(t *testing.T) {
 }
 
 func TestRedactedNeverLeaksLongPassword(t *testing.T) {
-	db := config.DB{Password: strings.Repeat("x", 64)}
+	db := config.DB{User: "avatars", Password: strings.Repeat("s3cret", 12)}
 
-	assert.NotContains(t, db.Redacted(), "x")
+	assert.NotContains(t, db.Redacted(), "s3cret")
 }
