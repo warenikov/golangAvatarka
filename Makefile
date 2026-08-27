@@ -4,11 +4,13 @@ MODULE      := go-avatar-service
 COMPOSE     := docker compose -f docker/docker-compose.yml
 GOOSE       := go run github.com/pressly/goose/v3/cmd/goose@latest
 MOCKERY     := go run github.com/vektra/mockery/v3@v3.7.0
+GOSEC       := go run github.com/securego/gosec/v2/cmd/gosec@latest
+GOVULN      := go run golang.org/x/vuln/cmd/govulncheck@latest
 MIGRATIONS  := ./migrations
 DB_DSN      ?= postgres://avatars:avatars@localhost:5432/avatars?sslmode=disable
 
 .DEFAULT_GOAL := help
-.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
+.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks sec test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
 
 help: ## Показать список команд
 	grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -47,9 +49,17 @@ ps: ## Статус контейнеров
 	$(COMPOSE) --profile app ps
 
 image: ## Собрать образ приложения
-	docker build -f docker/Dockerfile -t gophprofile:dev .
+	# --pull обязателен: без него docker берёт закешированный базовый образ,
+	# и сборка молча уезжает на непропатченной версии Go. Проверено —
+	# на залежавшемся golang:1.25-alpine govulncheck находил 11 уязвимостей
+	# стандартной библиотеки, на свежем не находит ни одной.
+	docker build --pull -f docker/Dockerfile -t gophprofile:dev .
 
 ## --- Качество ---
+
+sec: ## Безопасность: gosec + govulncheck
+	$(GOSEC) -quiet ./...
+	$(GOVULN) ./...
 
 lint: ## golangci-lint
 	golangci-lint run ./...
