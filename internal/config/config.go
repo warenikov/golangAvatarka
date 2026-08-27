@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,17 +164,34 @@ func (c *Config) Validate() error {
 // IsProd сообщает, запущен ли сервис в производственном окружении.
 func (c *Config) IsProd() bool { return c.App.Env == EnvProd }
 
+// connURL собирает адрес подключения к PostgreSQL.
+//
+// Экранирование доверено url.UserPassword, а не url.QueryEscape: последний
+// кодирует пробел как "+", а в userinfo это литеральный плюс, и пароль
+// с пробелом не переживал разбор адреса обратно.
+// net.JoinHostPort нужен ради IPv6: без скобок "::1" превращает адрес в мусор.
+func (d DB) connURL() url.URL {
+	return url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(d.User, d.Password),
+		Host:     net.JoinHostPort(d.Host, strconv.Itoa(d.Port)),
+		Path:     "/" + d.Name,
+		RawQuery: url.Values{"sslmode": {d.SSLMode}}.Encode(),
+	}
+}
+
 // DSN собирает строку подключения к PostgreSQL.
 func (d DB) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		url.QueryEscape(d.User), url.QueryEscape(d.Password),
-		d.Host, d.Port, d.Name, d.SSLMode)
+	u := d.connURL()
+
+	return u.String()
 }
 
 // Redacted возвращает DSN с замаскированным паролем — пригоден для логов.
 func (d DB) Redacted() string {
-	return fmt.Sprintf("postgres://%s:***@%s:%d/%s?sslmode=%s",
-		d.User, d.Host, d.Port, d.Name, d.SSLMode)
+	u := d.connURL()
+
+	return u.Redacted()
 }
 
 // AllowedMIMESet проверяет, разрешён ли MIME-тип к загрузке.
