@@ -45,7 +45,8 @@ type App struct {
 	MaxImagePixels  int64         `env:"APP_MAX_IMAGE_PIXELS" envDefault:"50000000"`
 	AllowedMIME     []string      `env:"APP_ALLOWED_MIME" envSeparator:"," envDefault:"image/jpeg,image/png,image/webp"`
 	CORSOrigins     []string      `env:"APP_CORS_ORIGINS" envSeparator:"," envDefault:"http://localhost:8080"`
-	RateLimitRPM    int           `env:"APP_RATE_LIMIT_RPM" envDefault:"60"`
+	RateLimitRPM    int           `env:"APP_RATE_LIMIT_RPM" envDefault:"300"`
+	RateLimitUpload int           `env:"APP_RATE_LIMIT_UPLOAD_RPM" envDefault:"10"`
 }
 
 type DB struct {
@@ -122,6 +123,20 @@ func (c *Config) Validate() error {
 	}
 	if len(c.App.AllowedMIME) == 0 {
 		errs = append(errs, errors.New("APP_ALLOWED_MIME: список пуст"))
+	}
+	if c.App.RateLimitRPM < 1 {
+		errs = append(errs, fmt.Errorf("APP_RATE_LIMIT_RPM: ожидается положительное число, получено %d", c.App.RateLimitRPM))
+	}
+	if c.App.RateLimitUpload < 1 {
+		errs = append(errs, fmt.Errorf("APP_RATE_LIMIT_UPLOAD_RPM: ожидается положительное число, получено %d",
+			c.App.RateLimitUpload))
+	}
+	if c.App.RateLimitUpload > c.App.RateLimitRPM {
+		errs = append(errs, fmt.Errorf("APP_RATE_LIMIT_UPLOAD_RPM (%d) больше общего лимита APP_RATE_LIMIT_RPM (%d)",
+			c.App.RateLimitUpload, c.App.RateLimitRPM))
+	}
+	if len(c.App.CORSOrigins) == 0 {
+		errs = append(errs, errors.New("APP_CORS_ORIGINS: список пуст"))
 	}
 	if c.DB.Port < 1 || c.DB.Port > 65535 {
 		errs = append(errs, fmt.Errorf("DB_PORT: вне диапазона 1-65535: %d", c.DB.Port))

@@ -89,14 +89,19 @@ func run() error {
 	repo := postgres.NewAvatarRepository(pool)
 	avatarSvc := services.NewAvatarService(repo, storage, publisher, log)
 
+	// Один ограничитель на обе точки входа загрузки — REST и веб-форму.
+	uploadLimiter := rest.UploadRateLimiter(log.With("component", "ratelimit"), cfg.App.RateLimitUpload)
+	webHandler := webui.NewHandler(avatarSvc, cfg, log.With("component", "web"), uploadLimiter)
+
 	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
-		Config:   cfg,
-		Log:      log,
-		Metrics:  observability.NewHTTP(registry),
-		Registry: registry,
-		Avatars:  rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
-		Web:      webui.NewHandler(avatarSvc, cfg, log.With("component", "web")),
+		Config:        cfg,
+		Log:           log,
+		Metrics:       observability.NewHTTP(registry),
+		Registry:      registry,
+		Avatars:       rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
+		Web:           webHandler,
+		UploadLimiter: uploadLimiter,
 		Checkers: []rest.Checker{
 			postgres.NewHealthChecker(pool),
 			s3.NewHealthChecker(storage),

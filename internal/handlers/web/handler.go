@@ -30,20 +30,26 @@ const (
 )
 
 type Handler struct {
-	svc *services.AvatarService
-	cfg *config.Config
-	log *slog.Logger
+	svc      *services.AvatarService
+	cfg      *config.Config
+	log      *slog.Logger
+	uploadMW []func(http.Handler) http.Handler
 }
 
 // NewHandler создаёт обработчики страниц веб-интерфейса.
-func NewHandler(svc *services.AvatarService, cfg *config.Config, log *slog.Logger) *Handler {
-	return &Handler{svc: svc, cfg: cfg, log: log}
+// Необязательные uploadMW навешиваются только на приём формы загрузки:
+// она дороже остальных страниц и ограничивается отдельно от них.
+func NewHandler(
+	svc *services.AvatarService, cfg *config.Config, log *slog.Logger,
+	uploadMW ...func(http.Handler) http.Handler,
+) *Handler {
+	return &Handler{svc: svc, cfg: cfg, log: log, uploadMW: uploadMW}
 }
 
 // Routes регистрирует страницы веб-интерфейса на переданном роутере.
 func (h *Handler) Routes(r chi.Router) {
 	r.Get("/upload", h.UploadForm)
-	r.Post("/upload", h.Upload)
+	r.With(h.uploadMW...).Post("/upload", h.Upload)
 	r.Get("/gallery", h.GalleryLookup)
 	r.Get("/gallery/{user_id}", h.Gallery)
 	r.Post("/avatars/{avatar_id}/delete", h.Delete)
@@ -60,6 +66,11 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.App.MaxUploadBytes)
 
+	// security(G120): разбор формы ограничен — MaxBytesReader строкой выше
+	// режет тело на APP_MAX_UPLOAD_BYTES, а multipartMemory задаёт порог,
+	// после которого части уходят во временные файлы (их удаляет net/http
+	// по завершении запроса).
+	// #nosec G120 -- тело запроса ограничено MaxBytesReader выше
 	if err := r.ParseMultipartForm(multipartMemory); err != nil {
 		h.renderUploadError(ctx, w, "", err)
 
@@ -107,6 +118,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G710 -- userID прошёл domain.ValidateUserID, см. galleryPath
 	http.Redirect(w, r, galleryPath(userID), http.StatusSeeOther)
 }
 
@@ -128,6 +140,7 @@ func (h *Handler) GalleryLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G710 -- userID прошёл domain.ValidateUserID, см. galleryPath
 	http.Redirect(w, r, galleryPath(userID), http.StatusSeeOther)
 }
 
@@ -180,6 +193,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G710 -- userID прошёл domain.ValidateUserID, см. galleryPath
 	http.Redirect(w, r, galleryPath(userID), http.StatusSeeOther)
 }
 
@@ -253,6 +267,14 @@ func openUploadedFile(r *http.Request) (io.ReadCloser, *multipart.FileHeader, er
 	return file, header, nil
 }
 
+// galleryPath собирает путь галереи пользователя.
+//
+// security(G710): открытого редиректа здесь нет, хотя анализатор помечает
+// userID как значение из запроса. Все вызывающие сначала прогоняют его через
+// domain.ValidateUserID, который допускает только [A-Za-z0-9._@+-]: ни "/",
+// ни ":", ни "\\" в значение не попадут, поэтому результат всегда остаётся
+// относительным путём внутри своего origin и не может стать "//host" или
+// "https://host". Уберут валидацию — редирект станет уводимым наружу.
 func galleryPath(userID string) string {
 	return "/web/gallery/" + url.PathEscape(userID)
 }
