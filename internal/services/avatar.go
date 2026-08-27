@@ -94,42 +94,13 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Ava
 	return avatar, nil
 }
 
-// Get возвращает метаданные аватарки и содержимое запрошенного размера.
+// Open открывает содержимое аватарки запрошенного размера.
 // Если миниатюры ещё не готовы, отдаётся оригинал.
-func (s *AvatarService) Get(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, *domain.Object, error) {
-	avatar, err := s.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	obj, err := s.openSize(ctx, avatar, size)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return avatar, obj, nil
-}
-
-// GetCurrent возвращает последнюю аватарку пользователя.
-func (s *AvatarService) GetCurrent(ctx context.Context, userID, size string) (*domain.Avatar, *domain.Object, error) {
-	if err := domain.ValidateUserID(userID); err != nil {
-		return nil, nil, err
-	}
-
-	avatar, err := s.repo.GetCurrentByUserID(ctx, userID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	obj, err := s.openSize(ctx, avatar, size)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return avatar, obj, nil
-}
-
-func (s *AvatarService) openSize(ctx context.Context, avatar *domain.Avatar, size string) (*domain.Object, error) {
+//
+// Метаданные и содержимое разделены намеренно: ETag считается по метаданным,
+// и условный запрос с совпавшим If-None-Match должен отвечать 304, ни разу
+// не сходив в хранилище.
+func (s *AvatarService) Open(ctx context.Context, avatar *domain.Avatar, size string) (*domain.Object, error) {
 	key := avatar.S3Key
 
 	if size != "" && size != domain.SizeOriginal {
@@ -153,6 +124,15 @@ func (s *AvatarService) openSize(ctx context.Context, avatar *domain.Avatar, siz
 // Metadata возвращает метаданные аватарки.
 func (s *AvatarService) Metadata(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+// CurrentMetadata возвращает метаданные последней аватарки пользователя.
+func (s *AvatarService) CurrentMetadata(ctx context.Context, userID string) (*domain.Avatar, error) {
+	if err := domain.ValidateUserID(userID); err != nil {
+		return nil, err
+	}
+
+	return s.repo.GetCurrentByUserID(ctx, userID)
 }
 
 // List возвращает все аватарки пользователя.
@@ -185,11 +165,7 @@ func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, userID string)
 
 // DeleteCurrent удаляет последнюю аватарку пользователя.
 func (s *AvatarService) DeleteCurrent(ctx context.Context, userID string) error {
-	if err := domain.ValidateUserID(userID); err != nil {
-		return err
-	}
-
-	avatar, err := s.repo.GetCurrentByUserID(ctx, userID)
+	avatar, err := s.CurrentMetadata(ctx, userID)
 	if err != nil {
 		return err
 	}

@@ -188,15 +188,14 @@ func (h *AvatarHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	avatar, obj, err := h.svc.Get(ctx, id, size)
+	avatar, err := h.svc.Metadata(ctx, id)
 	if err != nil {
 		h.writeReadError(ctx, w, err)
 
 		return
 	}
-	defer func() { _ = obj.Body.Close() }()
 
-	h.streamContent(ctx, w, r, avatar, obj, size, true)
+	h.serveContent(ctx, w, r, avatar, size)
 }
 
 // GetCurrent обрабатывает GET /api/v1/users/{user_id}/avatar.
@@ -210,7 +209,7 @@ func (h *AvatarHandler) GetCurrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	avatar, obj, err := h.svc.GetCurrent(ctx, userID, size)
+	avatar, err := h.svc.CurrentMetadata(ctx, userID)
 	if errors.Is(err, domain.ErrAvatarNotFound) || errors.Is(err, domain.ErrInvalidUserID) {
 		h.writeFallback(ctx, w)
 
@@ -221,9 +220,8 @@ func (h *AvatarHandler) GetCurrent(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	defer func() { _ = obj.Body.Close() }()
 
-	h.streamContent(ctx, w, r, avatar, obj, size, true)
+	h.serveContent(ctx, w, r, avatar, size)
 }
 
 // Metadata обрабатывает GET /api/v1/avatars/{avatar_id}/metadata.
@@ -317,18 +315,32 @@ func (h *AvatarHandler) DeleteCurrent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *AvatarHandler) streamContent(
+// serveContent отвечает содержимым аватарки, а на совпавший If-None-Match — 304.
+//
+// ETag считается по метаданным (id, размер, время обновления), поэтому проверка
+// идёт до обращения к хранилищу: раньше ревалидация закешированной аватарки
+// стоила полного GET к S3, тело которого тут же выбрасывалось.
+func (h *AvatarHandler) serveContent(
 	ctx context.Context, w http.ResponseWriter, r *http.Request,
-	avatar *domain.Avatar, obj *domain.Object, size string, cacheable bool,
+	avatar *domain.Avatar, size string,
 ) {
 	etag := contentETag(avatar, size)
 
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", cacheMaxAge))
 		w.WriteHeader(http.StatusNotModified)
 
 		return
 	}
+
+	obj, err := h.svc.Open(ctx, avatar, size)
+	if err != nil {
+		h.writeReadError(ctx, w, err)
+
+		return
+	}
+	defer func() { _ = obj.Body.Close() }()
 
 	contentType := obj.ContentType
 	if contentType == "" {
@@ -338,12 +350,9 @@ func (h *AvatarHandler) streamContent(
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", obj.Size))
 	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", cacheMaxAge))
 
-	if cacheable {
-		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", cacheMaxAge))
-	}
-
-	if _, err := io.Copy(w, obj.Body); err != nil {
+	if _, err = io.Copy(w, obj.Body); err != nil {
 		h.log.ErrorContext(ctx, "отдача содержимого аватарки", "avatar_id", avatar.ID, "err", err)
 	}
 }

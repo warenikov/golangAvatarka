@@ -146,7 +146,7 @@ func TestUploadSurvivesPublishFailure(t *testing.T) {
 	assert.Equal(t, domain.ProcessingStatusPending, avatar.ProcessingStatus)
 }
 
-func TestGet(t *testing.T) {
+func TestOpen(t *testing.T) {
 	id := uuid.New()
 	original := domain.OriginalObjectKey(testUserID, id)
 	small := domain.ThumbnailObjectKey(testUserID, id, domain.ThumbnailSmall)
@@ -192,18 +192,14 @@ func TestGet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			svc, d := newService(t)
 
-			d.repo.EXPECT().GetByID(mock.Anything, id).Return(tt.avatar, nil).Once()
-
 			if tt.thumbMissingInStorage {
 				d.storage.EXPECT().Get(mock.Anything, small).Return(nil, domain.ErrObjectNotFound).Once()
 			}
 			d.storage.EXPECT().Get(mock.Anything, tt.wantKey).Return(object("содержимое"), nil).Once()
 
-			avatar, obj, err := svc.Get(t.Context(), id, tt.size)
+			obj, err := svc.Open(t.Context(), tt.avatar, tt.size)
 			require.NoError(t, err)
 			defer func() { _ = obj.Body.Close() }()
-
-			assert.Equal(t, id, avatar.ID)
 
 			body, err := io.ReadAll(obj.Body)
 			require.NoError(t, err)
@@ -212,52 +208,40 @@ func TestGet(t *testing.T) {
 	}
 }
 
-func TestGetNotFound(t *testing.T) {
+// Open не ходит в репозиторий: метаданные ему передают уже прочитанными,
+// чтобы условный запрос мог ответить 304 без обращения к хранилищу.
+func TestOpenStorageFailure(t *testing.T) {
 	svc, d := newService(t)
-	id := uuid.New()
 
-	d.repo.EXPECT().GetByID(mock.Anything, id).Return(nil, domain.ErrAvatarNotFound).Once()
-
-	_, _, err := svc.Get(t.Context(), id, domain.SizeOriginal)
-	require.ErrorIs(t, err, domain.ErrAvatarNotFound)
-}
-
-func TestGetStorageFailure(t *testing.T) {
-	svc, d := newService(t)
 	id := uuid.New()
 	key := domain.OriginalObjectKey(testUserID, id)
+	avatar := &domain.Avatar{ID: id, UserID: testUserID, S3Key: key}
 
-	d.repo.EXPECT().GetByID(mock.Anything, id).
-		Return(&domain.Avatar{ID: id, UserID: testUserID, S3Key: key}, nil).Once()
 	d.storage.EXPECT().Get(mock.Anything, key).Return(nil, assert.AnError).Once()
 
-	_, _, err := svc.Get(t.Context(), id, domain.SizeOriginal)
+	_, err := svc.Open(t.Context(), avatar, domain.SizeOriginal)
 	require.ErrorIs(t, err, assert.AnError)
 	assert.Contains(t, err.Error(), "get avatar content")
 }
 
-func TestGetCurrent(t *testing.T) {
+func TestCurrentMetadata(t *testing.T) {
 	id := uuid.New()
-	key := domain.OriginalObjectKey(testUserID, id)
 
 	t.Run("последняя аватарка пользователя", func(t *testing.T) {
 		svc, d := newService(t)
 
 		d.repo.EXPECT().GetCurrentByUserID(mock.Anything, testUserID).
-			Return(&domain.Avatar{ID: id, UserID: testUserID, S3Key: key}, nil).Once()
-		d.storage.EXPECT().Get(mock.Anything, key).Return(object("png"), nil).Once()
+			Return(&domain.Avatar{ID: id, UserID: testUserID}, nil).Once()
 
-		avatar, obj, err := svc.GetCurrent(t.Context(), testUserID, domain.SizeOriginal)
+		avatar, err := svc.CurrentMetadata(t.Context(), testUserID)
 		require.NoError(t, err)
-		defer func() { _ = obj.Body.Close() }()
-
 		assert.Equal(t, id, avatar.ID)
 	})
 
 	t.Run("невалидный идентификатор", func(t *testing.T) {
 		svc, _ := newService(t)
 
-		_, _, err := svc.GetCurrent(t.Context(), "плохой id", domain.SizeOriginal)
+		_, err := svc.CurrentMetadata(t.Context(), "плохой id")
 		require.ErrorIs(t, err, domain.ErrInvalidUserID)
 	})
 
@@ -267,20 +251,32 @@ func TestGetCurrent(t *testing.T) {
 		d.repo.EXPECT().GetCurrentByUserID(mock.Anything, testUserID).
 			Return(nil, domain.ErrAvatarNotFound).Once()
 
-		_, _, err := svc.GetCurrent(t.Context(), testUserID, domain.SizeOriginal)
+		_, err := svc.CurrentMetadata(t.Context(), testUserID)
 		require.ErrorIs(t, err, domain.ErrAvatarNotFound)
 	})
 }
 
 func TestMetadata(t *testing.T) {
-	svc, d := newService(t)
-	id := uuid.New()
+	t.Run("метаданные аватарки", func(t *testing.T) {
+		svc, d := newService(t)
+		id := uuid.New()
 
-	d.repo.EXPECT().GetByID(mock.Anything, id).Return(&domain.Avatar{ID: id}, nil).Once()
+		d.repo.EXPECT().GetByID(mock.Anything, id).Return(&domain.Avatar{ID: id}, nil).Once()
 
-	avatar, err := svc.Metadata(t.Context(), id)
-	require.NoError(t, err)
-	assert.Equal(t, id, avatar.ID)
+		avatar, err := svc.Metadata(t.Context(), id)
+		require.NoError(t, err)
+		assert.Equal(t, id, avatar.ID)
+	})
+
+	t.Run("аватарки нет", func(t *testing.T) {
+		svc, d := newService(t)
+		id := uuid.New()
+
+		d.repo.EXPECT().GetByID(mock.Anything, id).Return(nil, domain.ErrAvatarNotFound).Once()
+
+		_, err := svc.Metadata(t.Context(), id)
+		require.ErrorIs(t, err, domain.ErrAvatarNotFound)
+	})
 }
 
 func TestList(t *testing.T) {

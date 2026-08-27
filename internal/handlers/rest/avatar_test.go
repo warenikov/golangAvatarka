@@ -282,6 +282,8 @@ func TestGetStreamsContent(t *testing.T) {
 	assert.NotEmpty(t, rec.Header().Get("ETag"))
 }
 
+// Ревалидация закешированной аватарки не должна стоить похода в хранилище:
+// ETag считается по метаданным, а тело объекта при 304 всё равно выбрасывается.
 func TestGetReturnsNotModified(t *testing.T) {
 	api, d := newAPI(t)
 
@@ -291,10 +293,12 @@ func TestGetReturnsNotModified(t *testing.T) {
 	d.repo.EXPECT().GetByID(mock.Anything, id).Return(avatar, nil).Twice()
 	d.storage.EXPECT().Get(mock.Anything, avatar.S3Key).Return(&domain.Object{
 		Body: io.NopCloser(strings.NewReader("данные")), ContentType: pngContentType, Size: 6,
-	}, nil).Twice()
+	}, nil).Once()
 
 	first := httptest.NewRecorder()
 	api.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil))
+	require.Equal(t, http.StatusOK, first.Code)
+
 	etag := first.Header().Get("ETag")
 	require.NotEmpty(t, etag)
 
@@ -306,7 +310,77 @@ func TestGetReturnsNotModified(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotModified, second.Code)
 	assert.Equal(t, etag, second.Header().Get("ETag"))
+	assert.Equal(t, "max-age=86400", second.Header().Get("Cache-Control"))
 	assert.Empty(t, second.Body.String())
+
+	d.storage.AssertNumberOfCalls(t, "Get", 1)
+	d.repo.AssertNumberOfCalls(t, "GetByID", 2)
+}
+
+// Тот же контракт для /users/{user_id}/avatar.
+func TestGetCurrentReturnsNotModified(t *testing.T) {
+	api, d := newAPI(t)
+
+	id := uuid.New()
+	avatar := storedAvatar(id)
+
+	d.repo.EXPECT().GetCurrentByUserID(mock.Anything, testUserID).Return(avatar, nil).Twice()
+	d.storage.EXPECT().Get(mock.Anything, avatar.S3Key).Return(&domain.Object{
+		Body: io.NopCloser(strings.NewReader("данные")), ContentType: pngContentType, Size: 6,
+	}, nil).Once()
+
+	path := "/api/v1/users/" + testUserID + "/avatar"
+
+	first := httptest.NewRecorder()
+	api.ServeHTTP(first, httptest.NewRequest(http.MethodGet, path, nil))
+	require.Equal(t, http.StatusOK, first.Code)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("If-None-Match", first.Header().Get("ETag"))
+
+	second := httptest.NewRecorder()
+	api.ServeHTTP(second, req)
+
+	assert.Equal(t, http.StatusNotModified, second.Code)
+	d.storage.AssertNumberOfCalls(t, "Get", 1)
+}
+
+// ETag завязан на время обновления: после появления миниатюр тот же
+// If-None-Match больше не совпадает и клиент получает свежее содержимое.
+func TestETagChangesAfterProcessing(t *testing.T) {
+	api, d := newAPI(t)
+
+	id := uuid.New()
+	before := storedAvatar(id)
+	before.ProcessingStatus = domain.ProcessingStatusPending
+	before.UpdatedAt = time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+
+	after := storedAvatar(id)
+	after.UpdatedAt = time.Date(2026, 8, 27, 10, 5, 0, 0, time.UTC)
+
+	d.repo.EXPECT().GetByID(mock.Anything, id).Return(before, nil).Once()
+	d.storage.EXPECT().Get(mock.Anything, before.S3Key).Return(&domain.Object{
+		Body: io.NopCloser(strings.NewReader("оригинал")), ContentType: pngContentType, Size: 8,
+	}, nil).Once()
+
+	first := httptest.NewRecorder()
+	api.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil))
+	oldETag := first.Header().Get("ETag")
+
+	d.repo.EXPECT().GetByID(mock.Anything, id).Return(after, nil).Once()
+	d.storage.EXPECT().Get(mock.Anything, after.S3Key).Return(&domain.Object{
+		Body: io.NopCloser(strings.NewReader("обновлён")), ContentType: pngContentType, Size: 8,
+	}, nil).Once()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil)
+	req.Header.Set("If-None-Match", oldETag)
+
+	second := httptest.NewRecorder()
+	api.ServeHTTP(second, req)
+
+	assert.Equal(t, http.StatusOK, second.Code)
+	assert.NotEqual(t, oldETag, second.Header().Get("ETag"))
+	assert.Equal(t, "обновлён", second.Body.String())
 }
 
 func TestGetServesThumbnail(t *testing.T) {
