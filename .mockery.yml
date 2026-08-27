@@ -1,0 +1,56 @@
+# Моки для тестов. Генерация: make mocks
+#
+# Каждый мок кладётся в mocks_test.go того пакета, который его использует.
+# Отдельный пакет internal/mocks был бы обычным (не тестовым) кодом и попал бы
+# в знаменатель покрытия: полторы тысячи строк сгенерированных методов
+# занижали итог на два десятка процентов.
+all: false
+template: testify
+formatter: goimports
+force-file-write: true
+
+# Один файл на исходный пакет: mockery не смешивает в одном файле моки из разных пакетов.
+filename: '{{.SrcPackageName}}_mocks_test.go'
+structname: 'Mock{{.InterfaceName}}'
+
+packages:
+  go-avatar-service/internal/domain:
+    interfaces:
+      ObjectStorage:
+        configs:
+          - dir: internal/services
+            pkgname: services_test
+          - dir: internal/handlers/rest
+            pkgname: rest_test
+          - dir: internal/handlers/web
+            pkgname: web
+          - dir: internal/worker
+            pkgname: worker
+
+  go-avatar-service/internal/services:
+    interfaces:
+      AvatarRepository:
+        configs:
+          - dir: internal/services
+            pkgname: services_test
+          - dir: internal/handlers/rest
+            pkgname: rest_test
+          - dir: internal/handlers/web
+            pkgname: web
+      EventPublisher:
+        configs:
+          - dir: internal/services
+            pkgname: services_test
+          - dir: internal/handlers/rest
+            pkgname: rest_test
+          - dir: internal/handlers/web
+            pkgname: web
+          - dir: internal/worker
+            pkgname: worker
+
+  go-avatar-service/internal/worker:
+    interfaces:
+      Repository:
+        configs:
+          - dir: internal/worker
+            pkgname: worker

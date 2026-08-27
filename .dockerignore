@@ -22,8 +22,6 @@ cover.out
 coverage.html
 
 # Прочее
-Makefile
 README.md
 LICENSE
-tests/
 k8s/
