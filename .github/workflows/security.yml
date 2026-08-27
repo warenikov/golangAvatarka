@@ -1,0 +1,42 @@
+name: Безопасность
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  schedule:
+    # Раз в неделю: уязвимости находят и после того, как код перестали трогать.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Проверяет не наличие уязвимой зависимости, а реальную достижимость
+      # уязвимого кода из наших вызовов — поэтому ложных срабатываний мало.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Обоснованные исключения помечены в коде через #nosec с пояснением.
+      - name: gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet ./...

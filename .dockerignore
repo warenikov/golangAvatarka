@@ -22,6 +22,7 @@ cover.out
 coverage.html
 
 # Прочее
+.github/
 README.md
 LICENSE
 k8s/

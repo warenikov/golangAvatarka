@@ -1,0 +1,30 @@
+name: Линт
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golangci:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # Версия закреплена, чтобы CI и локальный прогон давали один результат:
+          # новые релизы приносят новые проверки и ломают ранее зелёную ветку.
+          version: v2.10.1

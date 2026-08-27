@@ -1,0 +1,84 @@
+name: Тесты
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Юнит-тесты (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: go build
+        run: go build ./...
+
+      # -short пропускает тесты на testcontainers: они в отдельной задаче.
+      # -shuffle=on ловит тесты, зависящие от порядка выполнения.
+      - name: go test
+        run: go test ./... -short -race -shuffle=on -count=1
+
+  tidy:
+    name: go.mod в порядке
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: go mod tidy не меняет файлы
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  integration:
+    name: Интеграционные тесты и покрытие
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Тесты репозиториев поднимают PostgreSQL и MinIO через testcontainers.
+      # На ubuntu-latest демон Docker уже запущен, отдельная настройка не нужна.
+      - name: go test с покрытием
+        run: go test ./... -race -count=1 -coverprofile=cover.out -covermode=atomic
+
+      # Порог из требований курса. Падаем, а не предупреждаем: иначе покрытие
+      # тихо сползает вниз от изменения к изменению.
+      - name: Порог покрытия
+        run: |
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "Покрытие: ${total}%"
+          if awk "BEGIN {exit !(${total} < 50)}"; then
+            echo "::error::покрытие ${total}% ниже требуемых 50%"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage
+          path: cover.out
+          retention-days: 7

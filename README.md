@@ -1,5 +1,9 @@
 # GophProfile — сервис аватарок
 
+[![Тесты](https://github.com/warenikov/golangAvatarka/actions/workflows/test.yml/badge.svg)](https://github.com/warenikov/golangAvatarka/actions/workflows/test.yml)
+[![Линт](https://github.com/warenikov/golangAvatarka/actions/workflows/lint.yml/badge.svg)](https://github.com/warenikov/golangAvatarka/actions/workflows/lint.yml)
+[![Безопасность](https://github.com/warenikov/golangAvatarka/actions/workflows/security.yml/badge.svg)](https://github.com/warenikov/golangAvatarka/actions/workflows/security.yml)
+
 Микросервис на Go: пользователь загружает фото один раз, сторонние платформы
 получают аватарку по HTTP в нужном размере. Выпускная работа курса
 «Go-разработчик», Яндекс Практикум.
@@ -169,6 +173,10 @@ make sec           # gosec + govulncheck
 make mocks         # перегенерировать моки
 make migrate-up    # накатить миграции вручную
 ```
+
+Те же проверки идут в CI на каждый push в `main`/`dev` и на каждый pull request:
+юнит-тесты на двух версиях Go, интеграционные на testcontainers с порогом
+покрытия 50%, `golangci-lint`, `gosec`, `govulncheck` и сборка образа.
 
 Тесты репозиториев поднимают PostgreSQL и MinIO через testcontainers — нужен
 запущенный Docker.
