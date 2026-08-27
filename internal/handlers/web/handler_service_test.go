@@ -103,9 +103,12 @@ func TestUploadRedirectsToGallery(t *testing.T) {
 	assert.Equal(t, "/web/gallery/"+webUserID, rec.Header().Get("Location"))
 }
 
-// Идентификатор пользователя приходит из формы и попадает в путь галереи —
-// его нужно экранировать.
-func TestUploadEscapesUserIDInRedirect(t *testing.T) {
+// Идентификатор пользователя приходит из формы и попадает в путь галереи.
+// От подстановки в путь защищает не экранирование, а ValidateUserID:
+// url.PathEscape не меняет ни одного символа из разрешённого набора
+// (A-Za-z0-9._@+-), проверено перебором. Поэтому здесь ожидается точный
+// литерал, а не результат того же PathEscape, что вызывает обработчик.
+func TestUploadRedirectPreservesAllowedUserID(t *testing.T) {
 	router, d := serviceRouter(t)
 
 	userID := "user+tag@example.com"
@@ -124,14 +127,31 @@ func TestUploadEscapesUserIDInRedirect(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusSeeOther, rec.Code)
+	assert.Equal(t, "/web/gallery/user+tag@example.com", rec.Header().Get("Location"))
+}
 
-	location := rec.Header().Get("Location")
-	assert.Equal(t, "/web/gallery/"+url.PathEscape(userID), location)
+// Настоящая защита пути: идентификатор, способный увести редирект в чужой
+// каталог, отбивается валидацией и до galleryPath не доходит.
+func TestUploadRejectsPathBreakingUserID(t *testing.T) {
+	tests := []string{"../other", "user/../root", "user/nested", "bad user"}
 
-	escaped := strings.TrimPrefix(location, "/web/gallery/")
-	decoded, err := url.PathUnescape(escaped)
-	require.NoError(t, err)
-	assert.Equal(t, userID, decoded)
+	for _, userID := range tests {
+		t.Run(userID, func(t *testing.T) {
+			router, _ := serviceRouter(t)
+
+			contentType, body := multipartUpload(t, userID, formFieldFile, "avatar.png", webPNG(t))
+
+			req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
+			req.Header.Set("Content-Type", contentType)
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Empty(t, rec.Header().Get("Location"), "редиректа быть не должно")
+			assert.Contains(t, rec.Body.String(), "Некорректный User ID")
+		})
+	}
 }
 
 func TestUploadShowsServiceFailure(t *testing.T) {
