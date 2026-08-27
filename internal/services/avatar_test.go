@@ -2,6 +2,7 @@ package services_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -118,15 +119,64 @@ func TestUploadStorageFailure(t *testing.T) {
 	assert.Nil(t, avatar)
 }
 
-func TestUploadRepositoryFailure(t *testing.T) {
+// Файл уже в хранилище, а строка в базе не появилась. Реконсилятор обходит
+// только БД и такой объект не найдёт — его надо убрать сразу.
+func TestUploadRepositoryFailureRemovesOrphan(t *testing.T) {
+	svc, d := newService(t)
+
+	var storedKey string
+	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Run(func(_ context.Context, key string, _ io.Reader, _ int64, _ string) { storedKey = key }).
+		Return(nil).Once()
+	d.repo.EXPECT().Create(mock.Anything, mock.Anything).Return(assert.AnError).Once()
+
+	var deletedKey string
+	d.storage.EXPECT().Delete(mock.Anything, mock.Anything).
+		Run(func(_ context.Context, key string) { deletedKey = key }).
+		Return(nil).Once()
+
+	avatar, err := svc.Upload(t.Context(), uploadInput())
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Nil(t, avatar)
+	assert.Equal(t, storedKey, deletedKey, "убирается ровно тот объект, который только что записали")
+}
+
+// Уборка идёт на контексте без отмены: запрос к этому моменту мог быть отменён,
+// но мусор в хранилище от этого никуда не денется.
+func TestUploadRemovesOrphanEvenIfRequestCancelled(t *testing.T) {
+	svc, d := newService(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil).Once()
+	d.repo.EXPECT().Create(mock.Anything, mock.Anything).
+		Run(func(context.Context, *domain.Avatar) { cancel() }).
+		Return(assert.AnError).Once()
+
+	var cleanupErr error
+	d.storage.EXPECT().Delete(mock.Anything, mock.Anything).
+		Run(func(cleanupCtx context.Context, _ string) { cleanupErr = cleanupCtx.Err() }).
+		Return(nil).Once()
+
+	_, err := svc.Upload(ctx, uploadInput())
+	require.ErrorIs(t, err, assert.AnError)
+	assert.NoError(t, cleanupErr, "контекст уборки не должен быть отменён вместе с запросом")
+}
+
+// Не удалось убрать — важнее вернуть исходную ошибку загрузки, а про файл
+// остаётся запись в логе.
+func TestUploadReportsOriginalErrorWhenCleanupFails(t *testing.T) {
 	svc, d := newService(t)
 
 	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nil).Once()
 	d.repo.EXPECT().Create(mock.Anything, mock.Anything).Return(assert.AnError).Once()
+	d.storage.EXPECT().Delete(mock.Anything, mock.Anything).Return(errors.New("хранилище недоступно")).Once()
 
 	avatar, err := svc.Upload(t.Context(), uploadInput())
 	require.ErrorIs(t, err, assert.AnError)
+	assert.NotContains(t, err.Error(), "хранилище недоступно")
 	assert.Nil(t, avatar)
 }
 

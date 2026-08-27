@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
 	"go-avatar-service/internal/domain"
 )
+
+// orphanCleanupTimeout ограничивает уборку файла, оставшегося без метаданных.
+const orphanCleanupTimeout = 5 * time.Second
 
 type AvatarRepository interface {
 	Create(ctx context.Context, a *domain.Avatar) error
@@ -77,6 +81,8 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Ava
 	}
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
+		s.removeOrphan(ctx, key, avatarID)
+
 		return nil, fmt.Errorf("upload avatar: %w", err)
 	}
 
@@ -92,6 +98,23 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Ava
 	}
 
 	return avatar, nil
+}
+
+// removeOrphan убирает файл, на который не осталось ссылки в базе.
+//
+// Объект уже в хранилище, а метаданные не записались: реконсилятор обходит
+// только строки БД и такой файл не найдёт никогда — он остался бы там навсегда.
+// Уборка идёт на контексте без отмены: исходный запрос к этому моменту мог быть
+// уже отменён, а мусор убрать всё равно нужно. Если и удаление не удалось,
+// ошибка загрузки важнее — она и возвращается, а про файл остаётся запись в логе.
+func (s *AvatarService) removeOrphan(ctx context.Context, key string, avatarID uuid.UUID) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orphanCleanupTimeout)
+	defer cancel()
+
+	if err := s.storage.Delete(cleanupCtx, key); err != nil {
+		s.log.ErrorContext(ctx, "в хранилище остался файл без метаданных",
+			"avatar_id", avatarID, "key", key, "err", err)
+	}
 }
 
 // Open открывает содержимое аватарки запрошенного размера.

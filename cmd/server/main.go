@@ -58,8 +58,16 @@ func run() error {
 
 	log.InfoContext(ctx, "подключение к базе установлено", "dsn", cfg.DB.Redacted())
 
-	if err = postgres.Migrate(ctx, pool); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+	// В compose схему накатывает отдельный сервис migrate, и сервер стартует
+	// только после его успешного завершения. Локальный `make run-server`
+	// по-прежнему поднимает схему сам — иначе каждый запуск требовал бы
+	// отдельной команды.
+	if cfg.App.AutoMigrate {
+		if err = postgres.Migrate(ctx, pool); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+
+		log.InfoContext(ctx, "схема актуальна")
 	}
 
 	storage, err := s3.NewStorage(ctx, cfg.S3)

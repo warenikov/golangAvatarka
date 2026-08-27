@@ -41,6 +41,7 @@ type App struct {
 	ShutdownTimeout time.Duration `env:"APP_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	RequestTimeout  time.Duration `env:"APP_REQUEST_TIMEOUT" envDefault:"60s"`
 	Version         string        `env:"APP_VERSION" envDefault:"dev"`
+	AutoMigrate     bool          `env:"APP_AUTO_MIGRATE" envDefault:"true"`
 	MaxUploadBytes  int64         `env:"APP_MAX_UPLOAD_BYTES" envDefault:"10485760"`
 	MaxImagePixels  int64         `env:"APP_MAX_IMAGE_PIXELS" envDefault:"50000000"`
 	AllowedMIME     []string      `env:"APP_ALLOWED_MIME" envSeparator:"," envDefault:"image/jpeg,image/png,image/webp"`

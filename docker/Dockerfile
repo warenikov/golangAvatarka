@@ -18,6 +18,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata \
@@ -25,6 +29,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 COPY --from=builder /out/server /usr/local/bin/server
 COPY --from=builder /out/worker /usr/local/bin/worker
+COPY --from=builder /out/migrate /usr/local/bin/migrate
 
 USER avatars
 

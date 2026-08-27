@@ -15,8 +15,26 @@ const deathReasonRejected = "rejected"
 // Handler обрабатывает одно сообщение. Возврат ошибки отправляет его в ретрай.
 type Handler func(ctx context.Context, body []byte) error
 
+// amqpChannel — та часть канала AMQP, которой пользуется потребитель.
+// Объявлен интерфейсом, чтобы решение ack/nack/dead-letter можно было
+// проверить тестами: это самая рискованная логика транспорта, а поднимать
+// ради неё брокер в каждом прогоне слишком дорого.
+type amqpChannel interface {
+	Qos(prefetchCount, prefetchSize int, global bool) error
+	Close() error
+	Cancel(consumer string, noWait bool) error
+	ConsumeWithContext(
+		ctx context.Context, queue, consumer string,
+		autoAck, exclusive, noLocal, noWait bool, args amqp.Table,
+	) (<-chan amqp.Delivery, error)
+	PublishWithContext(
+		ctx context.Context, exchange, key string,
+		mandatory, immediate bool, msg amqp.Publishing,
+	) error
+}
+
 type Consumer struct {
-	channel    *amqp.Channel
+	channel    amqpChannel
 	exchange   string
 	prefetch   int
 	maxRetries int
