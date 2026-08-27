@@ -3,11 +3,12 @@
 MODULE      := go-avatar-service
 COMPOSE     := docker compose -f docker/docker-compose.yml
 GOOSE       := go run github.com/pressly/goose/v3/cmd/goose@latest
+MOCKERY     := go run github.com/vektra/mockery/v3@v3.7.0
 MIGRATIONS  := ./migrations
 DB_DSN      ?= postgres://avatars:avatars@localhost:5432/avatars?sslmode=disable
 
 .DEFAULT_GOAL := help
-.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
+.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
 
 help: ## Показать список команд
 	grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -61,6 +62,9 @@ fmt: ## Форматирование (gofmt + goimports через golangci-lint
 
 tidy: ## go mod tidy
 	go mod tidy
+
+mocks: ## Перегенерировать моки по .mockery.yml
+	$(MOCKERY)
 
 test: ## Тесты с детектором гонок
 	go test ./... -race -count=1
