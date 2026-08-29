@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 
@@ -15,14 +13,12 @@ import (
 
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/handlers/form"
 	"go-avatar-service/internal/services"
-	"go-avatar-service/internal/services/imageproc"
 )
 
 const (
 	formFieldUserID = "user_id"
-	formFieldFile   = "file"
-	formFieldImage  = "image"
 
 	multipartMemory = 4 << 20
 	bytesInMB       = 1 << 20
@@ -84,33 +80,20 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, header, err := openUploadedFile(r)
+	image, err := form.ReadImage(r, h.cfg.App.AllowedMIME)
 	if err != nil {
 		h.renderUploadError(ctx, w, userID, err)
 
 		return
 	}
-	defer func() { _ = file.Close() }()
-
-	mime, body, err := imageproc.Detect(file)
-	if err != nil {
-		h.renderUploadError(ctx, w, userID, err)
-
-		return
-	}
-
-	if err = imageproc.ValidateMIME(mime, h.cfg.App.AllowedMIME); err != nil {
-		h.renderUploadError(ctx, w, userID, err)
-
-		return
-	}
+	defer func() { _ = image.Close() }()
 
 	_, err = h.svc.Upload(ctx, services.UploadInput{
 		UserID:   userID,
-		FileName: header.Filename,
-		MimeType: mime,
-		Size:     header.Size,
-		Body:     body,
+		FileName: image.Name,
+		MimeType: image.MIME,
+		Size:     image.Size,
+		Body:     image.Body,
 	})
 	if err != nil {
 		h.renderUploadError(ctx, w, userID, err)
@@ -253,18 +236,6 @@ func (h *Handler) renderDeleteError(ctx context.Context, w http.ResponseWriter, 
 		h.log.ErrorContext(ctx, "удаление аватарки через веб-форму", "err", err)
 		h.renderError(ctx, w, http.StatusInternalServerError, "Не удалось удалить аватарку", "")
 	}
-}
-
-func openUploadedFile(r *http.Request) (io.ReadCloser, *multipart.FileHeader, error) {
-	file, header, err := r.FormFile(formFieldFile)
-	if errors.Is(err, http.ErrMissingFile) {
-		file, header, err = r.FormFile(formFieldImage)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return file, header, nil
 }
 
 // galleryPath собирает путь галереи пользователя.

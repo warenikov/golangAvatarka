@@ -317,6 +317,68 @@ func TestGetReturnsNotModified(t *testing.T) {
 	d.repo.AssertNumberOfCalls(t, "GetByID", 2)
 }
 
+// Заголовок может прийти списком или звёздочкой — и то, и другое обязано
+// давать 304 без обращения к хранилищу.
+func TestGetNotModifiedForListAndWildcard(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(etag string) string
+	}{
+		{"точное совпадение", func(e string) string { return e }},
+		{"звёздочка", func(string) string { return "*" }},
+		{"список, совпадение последним", func(e string) string { return `"x", "y", ` + e }},
+		{"слабый тег", func(e string) string { return "W/" + e }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api, d := newAPI(t)
+
+			id := uuid.New()
+			avatar := storedAvatar(id)
+
+			d.repo.EXPECT().GetByID(mock.Anything, id).Return(avatar, nil).Twice()
+			d.storage.EXPECT().Get(mock.Anything, avatar.S3Key).Return(&domain.Object{
+				Body: io.NopCloser(strings.NewReader("данные")), ContentType: pngContentType, Size: 6,
+			}, nil).Once()
+
+			first := httptest.NewRecorder()
+			api.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil))
+			require.Equal(t, http.StatusOK, first.Code)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil)
+			req.Header.Set("If-None-Match", tt.build(first.Header().Get("ETag")))
+
+			second := httptest.NewRecorder()
+			api.ServeHTTP(second, req)
+
+			assert.Equal(t, http.StatusNotModified, second.Code)
+			d.storage.AssertNumberOfCalls(t, "Get", 1)
+		})
+	}
+}
+
+// Повреждённый заголовок не должен превращаться в ложный 304.
+func TestGetIgnoresMalformedIfNoneMatch(t *testing.T) {
+	api, d := newAPI(t)
+
+	id := uuid.New()
+	avatar := storedAvatar(id)
+
+	d.repo.EXPECT().GetByID(mock.Anything, id).Return(avatar, nil).Once()
+	d.storage.EXPECT().Get(mock.Anything, avatar.S3Key).Return(&domain.Object{
+		Body: io.NopCloser(strings.NewReader("данные")), ContentType: pngContentType, Size: 6,
+	}, nil).Once()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String(), nil)
+	req.Header.Set("If-None-Match", "abc123")
+
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "тег без кавычек невалиден — отдаём тело")
+}
+
 // Тот же контракт для /users/{user_id}/avatar.
 func TestGetCurrentReturnsNotModified(t *testing.T) {
 	api, d := newAPI(t)
@@ -412,7 +474,9 @@ func TestGetRejectsBadRequests(t *testing.T) {
 	}{
 		{"идентификатор не UUID", "/api/v1/avatars/не-uuid", "Invalid avatar id"},
 		{"неизвестный размер", "/api/v1/avatars/" + id.String() + "?size=500x500", "Invalid size"},
-		{"webp не поддерживается", "/api/v1/avatars/" + id.String() + "?format=webp", "Unsupported format"},
+		{"конвертация не поддерживается", "/api/v1/avatars/" + id.String() + "?format=webp", "Unsupported parameter"},
+		{"format=jpeg тоже отвергается", "/api/v1/avatars/" + id.String() + "?format=jpeg", "Unsupported parameter"},
+		{"format=png тоже отвергается", "/api/v1/avatars/" + id.String() + "?format=png", "Unsupported parameter"},
 	}
 
 	for _, tt := range tests {

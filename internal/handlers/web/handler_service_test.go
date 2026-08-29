@@ -22,6 +22,7 @@ import (
 
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/handlers/form"
 	"go-avatar-service/internal/services"
 )
 
@@ -91,7 +92,7 @@ func TestUploadRedirectsToGallery(t *testing.T) {
 	d.repo.EXPECT().Create(mock.Anything, mock.Anything).Return(nil).Once()
 	d.publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(nil).Once()
 
-	contentType, body := multipartUpload(t, webUserID, formFieldFile, "avatar.png", webPNG(t))
+	contentType, body := multipartUpload(t, webUserID, form.FieldFile, "avatar.png", webPNG(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
 	req.Header.Set("Content-Type", contentType)
@@ -118,7 +119,7 @@ func TestUploadRedirectPreservesAllowedUserID(t *testing.T) {
 	d.repo.EXPECT().Create(mock.Anything, mock.Anything).Return(nil).Once()
 	d.publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(nil).Once()
 
-	contentType, body := multipartUpload(t, userID, formFieldFile, "avatar.png", webPNG(t))
+	contentType, body := multipartUpload(t, userID, form.FieldFile, "avatar.png", webPNG(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
 	req.Header.Set("Content-Type", contentType)
@@ -139,7 +140,7 @@ func TestUploadRejectsPathBreakingUserID(t *testing.T) {
 		t.Run(userID, func(t *testing.T) {
 			router, _ := serviceRouter(t)
 
-			contentType, body := multipartUpload(t, userID, formFieldFile, "avatar.png", webPNG(t))
+			contentType, body := multipartUpload(t, userID, form.FieldFile, "avatar.png", webPNG(t))
 
 			req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
 			req.Header.Set("Content-Type", contentType)
@@ -160,7 +161,7 @@ func TestUploadShowsServiceFailure(t *testing.T) {
 	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(assert.AnError).Once()
 
-	contentType, body := multipartUpload(t, webUserID, formFieldFile, "avatar.png", webPNG(t))
+	contentType, body := multipartUpload(t, webUserID, form.FieldFile, "avatar.png", webPNG(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
 	req.Header.Set("Content-Type", contentType)

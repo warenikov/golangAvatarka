@@ -17,17 +17,14 @@ import (
 
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/handlers/form"
 	"go-avatar-service/internal/services"
-	"go-avatar-service/internal/services/imageproc"
 	"go-avatar-service/web"
 )
 
 const (
 	headerUserID = "X-User-ID"
 	cacheMaxAge  = 86400
-
-	formFieldFile  = "file"
-	formFieldImage = "image"
 )
 
 var allowedSizes = []string{domain.SizeOriginal, domain.ThumbnailSmall, domain.ThumbnailLarge}
@@ -93,34 +90,20 @@ func (h *AvatarHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.App.MaxUploadBytes)
 
-	file, header, err := openUploadedFile(r)
+	image, err := form.ReadImage(r, h.cfg.App.AllowedMIME)
 	if err != nil {
 		h.writeUploadError(ctx, w, err)
 
 		return
 	}
-	defer func() { _ = file.Close() }()
-
-	mime, body, err := imageproc.Detect(file)
-	if err != nil {
-		h.writeUploadError(ctx, w, err)
-
-		return
-	}
-
-	if err = imageproc.ValidateMIME(mime, h.cfg.App.AllowedMIME); err != nil {
-		h.Error(ctx, w, http.StatusBadRequest, "Invalid file format",
-			fmt.Sprintf("Supported formats: %v", h.cfg.App.AllowedMIME))
-
-		return
-	}
+	defer func() { _ = image.Close() }()
 
 	avatar, err := h.svc.Upload(ctx, services.UploadInput{
 		UserID:   userID,
-		FileName: header.Filename,
-		MimeType: mime,
-		Size:     header.Size,
-		Body:     body,
+		FileName: image.Name,
+		MimeType: image.MIME,
+		Size:     image.Size,
+		Body:     image.Body,
 	})
 	if err != nil {
 		h.writeUploadError(ctx, w, err)
@@ -137,23 +120,6 @@ func (h *AvatarHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func openUploadedFile(r *http.Request) (io.ReadCloser, *multipartHeader, error) {
-	file, header, err := r.FormFile(formFieldFile)
-	if errors.Is(err, http.ErrMissingFile) {
-		file, header, err = r.FormFile(formFieldImage)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return file, &multipartHeader{Filename: header.Filename, Size: header.Size}, nil
-}
-
-type multipartHeader struct {
-	Filename string
-	Size     int64
-}
-
 func (h *AvatarHandler) writeUploadError(ctx context.Context, w http.ResponseWriter, err error) {
 	var maxBytes *http.MaxBytesError
 
@@ -165,8 +131,11 @@ func (h *AvatarHandler) writeUploadError(ctx context.Context, w http.ResponseWri
 		})
 	case errors.Is(err, http.ErrMissingFile):
 		h.Error(ctx, w, http.StatusBadRequest, "File is required",
-			fmt.Sprintf("Send the image in form field %q or %q", formFieldFile, formFieldImage))
-	case errors.Is(err, domain.ErrInvalidUserID), errors.Is(err, domain.ErrInvalidFormat):
+			fmt.Sprintf("Send the image in form field %q or %q", form.FieldFile, form.FieldImage))
+	case errors.Is(err, domain.ErrInvalidFormat):
+		h.Error(ctx, w, http.StatusBadRequest, "Invalid file format",
+			fmt.Sprintf("Supported formats: %v", h.cfg.App.AllowedMIME))
+	case errors.Is(err, domain.ErrInvalidUserID):
 		h.Error(ctx, w, http.StatusBadRequest, "Invalid request", err.Error())
 	default:
 		h.log.ErrorContext(ctx, "загрузка аватарки", "err", err)
@@ -326,7 +295,7 @@ func (h *AvatarHandler) serveContent(
 ) {
 	etag := contentETag(avatar, size)
 
-	if match := r.Header.Get("If-None-Match"); match == etag {
+	if matchesIfNoneMatch(r.Header.Get("If-None-Match"), etag) {
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", cacheMaxAge))
 		w.WriteHeader(http.StatusNotModified)
@@ -382,9 +351,12 @@ func (h *AvatarHandler) parseID(ctx context.Context, w http.ResponseWriter, r *h
 }
 
 func (h *AvatarHandler) parseSize(ctx context.Context, w http.ResponseWriter, r *http.Request) (string, bool) {
-	if format := r.URL.Query().Get("format"); format != "" && format != "jpeg" && format != "png" {
-		h.Error(ctx, w, http.StatusBadRequest, "Unsupported format",
-			"Only jpeg and png are supported; webp encoding is not available")
+	// Конвертация формата на лету не поддерживается, поэтому любое значение
+	// параметра — ошибка. Принимать его молча нельзя: клиент решил бы, что
+	// формат учтён, и получил бы оригинал под видом запрошенного типа.
+	if format := r.URL.Query().Get("format"); format != "" {
+		h.Error(ctx, w, http.StatusBadRequest, "Unsupported parameter",
+			"Format conversion is not supported; the stored format is always returned")
 
 		return "", false
 	}
