@@ -1,0 +1,74 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - errname
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive
+    - unconvert
+    - wastedassign
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    gosec:
+      excludes:
+        - G104
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: indent-error-flow
+        - name: errorf
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: unreachable-code
+        - name: var-naming
+    staticcheck:
+      checks:
+        - all
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+          - prealloc
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - go-avatar-service

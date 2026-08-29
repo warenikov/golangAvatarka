@@ -28,3 +28,14 @@
 
 # Compiled binary
 /app
+
+# Артефакты сборки
+/bin/
+vendor/
+
+# Покрытие тестами
+cover.out
+coverage.html
+
+# Локальный .env (пример — .env.example — коммитится)
+.env.local

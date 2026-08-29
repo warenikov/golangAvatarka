@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+CLAUDE.md
+.claude/
+
+# IDE
+.idea/
+.vscode/
+
+# Секреты
+.env
+
+# Артефакты сборки и тестов
+bin/
+*.exe
+*.test
+*.out
+cover.out
+coverage.html
+
+# Прочее
+.github/
+README.md
+LICENSE
+k8s/
