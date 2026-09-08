@@ -1,0 +1,34 @@
+name: Линт
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golangci:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Версия Go берётся из go.mod, а не stable. golangci-lint разбирает
+      # исходники собственным go/types, и линтер, собранный на Go N, падает
+      # на файлах, требующих Go N+1. Плавающий stable уже уронил сборку
+      # с "file requires newer Go version go1.27 (application built with go1.26)".
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # Та же версия, что стоит локально: иначе новые проверки нового релиза
+          # ломают ранее зелёную ветку без единого изменения в коде.
+          version: v2.10.1

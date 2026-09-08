@@ -1,0 +1,52 @@
+{{define "title"}}Галерея{{end}}
+
+{{define "content"}}
+{{with .Error}}
+<div class="bg-red-500/20 border border-red-500/50 text-red-200 px-4 py-3 rounded-lg">{{.}}</div>
+{{end}}
+
+<form method="get" action="/web/gallery" class="flex gap-3">
+  <input type="text" name="user_id" required value="{{.UserID}}" maxlength="255"
+    pattern="[A-Za-z0-9._@+\-]+" placeholder="User ID"
+    class="flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all">
+  <button type="submit"
+    class="bg-gradient-to-r from-purple-600 to-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-lg hover:from-purple-700 hover:to-blue-700 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all">
+    Показать
+  </button>
+</form>
+
+{{if .UserID}}
+<div class="border-t border-white/20 pt-6 space-y-4">
+  <h2 class="text-xl font-semibold text-white">
+    Аватарки {{.UserID}} <span class="text-white/50 text-base">— {{.Count}}</span>
+  </h2>
+
+  {{if .Avatars}}
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+    {{range .Avatars}}
+    <figure class="bg-white/5 border border-white/10 rounded-xl p-3 space-y-2">
+      <a href="{{.OriginalURL}}" target="_blank" rel="noopener" title="Открыть оригинал">
+        <img src="{{.ThumbnailURL}}" alt="{{.FileName}}" width="100" height="100" loading="lazy"
+          class="w-full aspect-square object-cover rounded-lg shadow-lg bg-black/30">
+      </a>
+      <figcaption class="space-y-1">
+        <p class="text-white text-sm truncate" title="{{.FileName}}">{{.FileName}}</p>
+        <p class="text-white/50 text-xs">{{.Created}}</p>
+        <span class="inline-block px-2 py-0.5 rounded-full text-xs {{.StatusClass}}">{{.StatusLabel}}</span>
+      </figcaption>
+      <form method="post" action="/web/avatars/{{.ID}}/delete">
+        <input type="hidden" name="user_id" value="{{$.UserID}}">
+        <button type="submit"
+          class="w-full bg-red-600/80 text-white text-sm font-medium py-2 rounded-lg hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-400 transition-all">
+          Удалить
+        </button>
+      </form>
+    </figure>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="text-white/60">Аватарок пока нет. <a href="/web/upload" class="underline hover:text-white">Загрузить первую</a>.</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}
