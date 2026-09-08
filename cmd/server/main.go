@@ -50,6 +50,32 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := observability.SetupTracing(ctx, observability.TracingConfig{
+		Enabled:     cfg.Tracing.Enabled,
+		Endpoint:    cfg.Tracing.Endpoint,
+		ServiceName: "gophprofile-server",
+		Version:     cfg.App.Version,
+		Environment: cfg.App.Env,
+		SampleRatio: cfg.Tracing.SampleRatio,
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+
+	// Контекст отдельный: основной к моменту остановки уже отменён сигналом,
+	// а накопленные спаны нужно успеть дослать.
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.App.ShutdownTimeout)
+		defer cancel()
+
+		if flushErr := shutdownTracing(flushCtx); flushErr != nil {
+			log.Error("трейсы не досланы", "err", flushErr)
+		}
+	}()
+
+	log.InfoContext(ctx, "трейсинг настроен",
+		"enabled", cfg.Tracing.Enabled, "endpoint", cfg.Tracing.Endpoint)
+
 	pool, err := postgres.NewPool(ctx, cfg.DB)
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
