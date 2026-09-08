@@ -9,6 +9,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel/codes"
+
+	"go-avatar-service/internal/observability"
 )
 
 const deathReasonRejected = "rejected"
@@ -39,6 +41,7 @@ type Consumer struct {
 	exchange   string
 	prefetch   int
 	maxRetries int
+	metrics    *observability.Business
 	log        *slog.Logger
 }
 
@@ -63,6 +66,13 @@ func NewConsumer(conn *Connection, prefetch, maxRetries int, log *slog.Logger) (
 		maxRetries: maxRetries,
 		log:        log,
 	}, nil
+}
+
+// WithMetrics подключает бизнес-метрики к потребителю.
+func (c *Consumer) WithMetrics(m *observability.Business) *Consumer {
+	c.metrics = m
+
+	return c
 }
 
 // Close закрывает канал потребителя.
@@ -132,6 +142,7 @@ func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.
 
 	if deathCount(d) >= int64(c.maxRetries) {
 		span.SetStatus(codes.Error, "retries exhausted")
+		c.metrics.EventDeadLettered()
 		log.ErrorContext(ctx, "исчерпаны попытки, сообщение уходит в очередь разбора", "err", err)
 		c.toDeadLetter(ctx, log, d)
 

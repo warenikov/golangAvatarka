@@ -44,6 +44,7 @@ type AvatarService struct {
 	repo      AvatarRepository
 	storage   domain.ObjectStorage
 	publisher EventPublisher
+	metrics   *observability.Business
 	log       *slog.Logger
 }
 
@@ -53,8 +54,23 @@ func NewAvatarService(
 	storage domain.ObjectStorage,
 	publisher EventPublisher,
 	log *slog.Logger,
+	opts ...Option,
 ) *AvatarService {
-	return &AvatarService{repo: repo, storage: storage, publisher: publisher, log: log}
+	svc := &AvatarService{repo: repo, storage: storage, publisher: publisher, log: log}
+	for _, opt := range opts {
+		opt(svc)
+	}
+
+	return svc
+}
+
+// Option настраивает необязательные зависимости сервиса.
+type Option func(*AvatarService)
+
+// WithMetrics подключает бизнес-метрики. Без него сервис работает молча:
+// в тестах реестр метрик не нужен.
+func WithMetrics(m *observability.Business) Option {
+	return func(s *AvatarService) { s.metrics = m }
 }
 
 // Upload сохраняет файл в хранилище, заводит метаданные и ставит задачу на обработку.
@@ -79,6 +95,8 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (_ *domain.A
 	)
 
 	if err = s.storage.Put(ctx, key, in.Body, in.Size, in.MimeType); err != nil {
+		s.metrics.UploadFinished(observability.ResultError, in.Size)
+
 		return nil, fmt.Errorf("upload avatar: %w", err)
 	}
 
@@ -96,6 +114,7 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (_ *domain.A
 
 	if err = s.repo.Create(ctx, avatar); err != nil {
 		s.removeOrphan(ctx, key, avatarID)
+		s.metrics.UploadFinished(observability.ResultError, in.Size)
 
 		return nil, fmt.Errorf("upload avatar: %w", err)
 	}
@@ -110,6 +129,10 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (_ *domain.A
 		s.log.ErrorContext(ctx, "событие загрузки не опубликовано",
 			"avatar_id", avatarID, "err", err)
 	}
+
+	// Загрузка удалась: файл и метаданные на месте. Неопубликованное событие
+	// подберёт реконсилятор, поэтому для клиента это успех.
+	s.metrics.UploadFinished(observability.ResultOK, in.Size)
 
 	return avatar, nil
 }
@@ -218,6 +241,8 @@ func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, userID string)
 	if err = s.publisher.PublishDelete(ctx, event); err != nil {
 		s.log.ErrorContext(ctx, "событие удаления не опубликовано", "avatar_id", id, "err", err)
 	}
+
+	s.metrics.AvatarDeleted()
 
 	return nil
 }

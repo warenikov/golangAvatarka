@@ -3,20 +3,27 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
+	"go-avatar-service/internal/handlers/rest"
 	"go-avatar-service/internal/logger"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/repository/postgres"
 	"go-avatar-service/internal/repository/s3"
 	"go-avatar-service/internal/worker"
 )
+
+const healthTimeout = 2 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -87,15 +94,20 @@ func run() error {
 		}
 	}()
 
+	registry := observability.NewRegistry()
+	metrics := observability.NewBusiness(registry)
+
 	publisher, err := rabbitmq.NewPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: %w", err)
 	}
+	publisher = publisher.WithMetrics(metrics)
 
 	repo := postgres.NewAvatarRepository(pool)
-	processor := worker.NewProcessor(repo, storage, cfg.App.MaxImagePixels, log)
+	processor := worker.NewProcessor(repo, storage, cfg.App.MaxImagePixels, log,
+		worker.WithMetrics(metrics))
 	reconciler := worker.NewReconciler(repo, publisher,
-		cfg.Worker.ReconcileInterval, cfg.Worker.ReconcileAge, log)
+		cfg.Worker.ReconcileInterval, cfg.Worker.ReconcileAge, log).WithMetrics(metrics)
 
 	group, groupCtx := errgroup.WithContext(ctx)
 
@@ -113,6 +125,8 @@ func run() error {
 			return fmt.Errorf("rabbitmq consumer %s: %w", c.queue, consumerErr)
 		}
 
+		consumer = consumer.WithMetrics(metrics)
+
 		group.Go(func() error {
 			defer func() { _ = consumer.Close() }()
 
@@ -121,6 +135,14 @@ func run() error {
 	}
 
 	group.Go(func() error { return reconciler.Run(groupCtx) })
+
+	// Служебный сервер: без него метрики воркера снять неоткуда.
+	admin := observability.NewServer(cfg.Worker.AdminAddr, registry, workerHealth(pool, storage, conn), log)
+	group.Go(func() error {
+		admin.Run(groupCtx)
+
+		return nil
+	})
 
 	log.InfoContext(ctx, "воркер запущен", "env", cfg.App.Env)
 
@@ -131,4 +153,21 @@ func run() error {
 	log.Info("воркер остановлен")
 
 	return nil
+}
+
+// workerHealth отвечает на проверку живости воркера состоянием его зависимостей.
+//
+// Воркер не принимает трафик, поэтому проверка нужна не балансировщику,
+// а оркестратору: без неё зависший на мёртвом соединении процесс выглядит
+// живым и очередь молча копится.
+func workerHealth(pool *pgxpool.Pool, storage *s3.Storage, conn *rabbitmq.Connection) http.HandlerFunc {
+	checkers := []rest.Checker{
+		postgres.NewHealthChecker(pool),
+		s3.NewHealthChecker(storage),
+		rabbitmq.NewHealthChecker(conn),
+	}
+
+	handler := rest.NewHealthHandler(slog.Default(), "worker", healthTimeout, false, checkers...)
+
+	return handler.Handle
 }

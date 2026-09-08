@@ -26,6 +26,10 @@ func validConfig() *config.Config {
 	cfg.App.CORSOrigins = []string{"http://localhost:8080"}
 	cfg.App.RateLimitRPM = 300
 	cfg.App.RateLimitUpload = 10
+	cfg.Worker.AdminAddr = ":8081"
+	cfg.Tracing.Enabled = true
+	cfg.Tracing.Endpoint = "jaeger:4317"
+	cfg.Tracing.SampleRatio = 1.0
 	cfg.DB.Port = 5432
 	cfg.DB.MinConns = 2
 	cfg.DB.MaxConns = 10
@@ -78,6 +82,9 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, []string{"image/jpeg", "image/png", "image/webp"}, cfg.App.AllowedMIME)
 	assert.Equal(t, 5432, cfg.DB.Port)
 	assert.Equal(t, 300, cfg.App.RateLimitRPM)
+	assert.True(t, cfg.Tracing.Enabled, "в разработке трейсинг нужен по умолчанию")
+	assert.InDelta(t, 1.0, cfg.Tracing.SampleRatio, 0.0001, "в разработке нужен каждый запрос")
+	assert.Equal(t, ":8081", cfg.Worker.AdminAddr)
 	assert.Equal(t, 10, cfg.App.RateLimitUpload,
 		"загрузка дороже чтения и ограничивается строже")
 	assert.Equal(t, []string{"http://localhost:8080"}, cfg.App.CORSOrigins,
@@ -148,6 +155,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "больше общего лимита",
 		},
 		{"пустой список CORS", func(c *config.Config) { c.App.CORSOrigins = nil }, "APP_CORS_ORIGINS"},
+		{"пустой служебный адрес воркера", func(c *config.Config) { c.Worker.AdminAddr = "" }, "WORKER_ADMIN_ADDR"},
+		{
+			name:    "трейсинг включён без адреса",
+			mutate:  func(c *config.Config) { c.Tracing.Endpoint = "" },
+			wantErr: "TRACING_ENDPOINT",
+		},
+		{
+			name:    "выключенный трейсинг адреса не требует",
+			mutate:  func(c *config.Config) { c.Tracing.Enabled = false; c.Tracing.Endpoint = "" },
+			wantErr: "",
+		},
+		{"доля сэмплирования выше единицы", func(c *config.Config) { c.Tracing.SampleRatio = 1.5 }, "TRACING_SAMPLE_RATIO"},
+		{"отрицательная доля сэмплирования", func(c *config.Config) { c.Tracing.SampleRatio = -0.1 }, "TRACING_SAMPLE_RATIO"},
 		{"порт вне диапазона", func(c *config.Config) { c.DB.Port = 70000 }, "DB_PORT"},
 		{"min больше max", func(c *config.Config) { c.DB.MinConns = 20 }, "DB_MIN_CONNS"},
 		{"пустой бакет", func(c *config.Config) { c.S3.Bucket = "" }, "S3_BUCKET"},

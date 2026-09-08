@@ -14,8 +14,9 @@ import (
 )
 
 type Publisher struct {
-	conn *Connection
-	mu   sync.Mutex
+	conn    *Connection
+	metrics *observability.Business
+	mu      sync.Mutex
 }
 
 // NewPublisher включает подтверждения публикации и возвращает публикатор событий.
@@ -28,13 +29,34 @@ func NewPublisher(conn *Connection) (*Publisher, error) {
 }
 
 // PublishUpload отправляет событие о загруженной аватарке.
+// WithMetrics подключает бизнес-метрики к издателю.
+func (p *Publisher) WithMetrics(m *observability.Business) *Publisher {
+	p.metrics = m
+
+	return p
+}
+
 func (p *Publisher) PublishUpload(ctx context.Context, event domain.AvatarUploadEvent) error {
-	return p.publish(ctx, RoutingUploaded, event.AvatarID, event)
+	return p.publishTracked(ctx, RoutingUploaded, observability.EventUpload, event.AvatarID, event)
 }
 
 // PublishDelete отправляет событие об удалённой аватарке.
 func (p *Publisher) PublishDelete(ctx context.Context, event domain.AvatarDeleteEvent) error {
-	return p.publish(ctx, RoutingDeleted, event.AvatarID, event)
+	return p.publishTracked(ctx, RoutingDeleted, observability.EventDelete, event.AvatarID, event)
+}
+
+// publishTracked публикует событие и учитывает результат в метриках.
+func (p *Publisher) publishTracked(ctx context.Context, routingKey, kind, messageID string, payload any) error {
+	err := p.publish(ctx, routingKey, messageID, payload)
+
+	result := observability.ResultOK
+	if err != nil {
+		result = observability.ResultError
+	}
+
+	p.metrics.EventPublished(kind, result)
+
+	return err
 }
 
 // publish отправляет сообщение и дожидается подтверждения брокера.

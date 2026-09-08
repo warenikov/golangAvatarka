@@ -120,14 +120,19 @@ func run() error {
 
 	log.InfoContext(ctx, "брокер подключён", "exchange", cfg.RabbitMQ.Exchange)
 
+	registry := observability.NewRegistry()
+	businessMetrics := observability.NewBusiness(registry)
+
+	publisher = publisher.WithMetrics(businessMetrics)
+
 	repo := postgres.NewAvatarRepository(pool)
-	avatarSvc := services.NewAvatarService(repo, storage, publisher, log)
+	avatarSvc := services.NewAvatarService(repo, storage, publisher, log,
+		services.WithMetrics(businessMetrics))
 
 	// Один ограничитель на обе точки входа загрузки — REST и веб-форму.
 	uploadLimiter := rest.UploadRateLimiter(log.With("component", "ratelimit"), cfg.App.RateLimitUpload)
 	webHandler := webui.NewHandler(avatarSvc, cfg, log.With("component", "web"), uploadLimiter)
 
-	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,

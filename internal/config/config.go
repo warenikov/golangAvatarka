@@ -95,6 +95,8 @@ type Tracing struct {
 type Worker struct {
 	ReconcileInterval time.Duration `env:"WORKER_RECONCILE_INTERVAL" envDefault:"1m"`
 	ReconcileAge      time.Duration `env:"WORKER_RECONCILE_AGE" envDefault:"5m"`
+	// Служебный адрес воркера: /metrics и /health. Наружу не публикуется.
+	AdminAddr string `env:"WORKER_ADMIN_ADDR" envDefault:":8081"`
 }
 
 // Load читает файл .env, если он существует, разбирает переменные окружения и проверяет значения.
@@ -148,6 +150,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.App.CORSOrigins) == 0 {
 		errs = append(errs, errors.New("APP_CORS_ORIGINS: список пуст"))
+	}
+	if c.Worker.AdminAddr == "" {
+		errs = append(errs, errors.New("WORKER_ADMIN_ADDR: пустой адрес"))
 	}
 	if c.Tracing.Enabled && c.Tracing.Endpoint == "" {
 		errs = append(errs, errors.New("TRACING_ENDPOINT: пустой адрес при включённом трейсинге"))

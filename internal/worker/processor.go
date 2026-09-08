@@ -36,12 +36,29 @@ type Processor struct {
 	repo      Repository
 	storage   domain.ObjectStorage
 	maxPixels int64
+	metrics   *observability.Business
 	log       *slog.Logger
 }
 
 // NewProcessor создаёт обработчик событий обработки аватарок.
-func NewProcessor(repo Repository, storage domain.ObjectStorage, maxPixels int64, log *slog.Logger) *Processor {
-	return &Processor{repo: repo, storage: storage, maxPixels: maxPixels, log: log}
+func NewProcessor(
+	repo Repository, storage domain.ObjectStorage, maxPixels int64,
+	log *slog.Logger, opts ...Option,
+) *Processor {
+	p := &Processor{repo: repo, storage: storage, maxPixels: maxPixels, log: log}
+	for _, opt := range opts {
+		opt(p)
+	}
+
+	return p
+}
+
+// Option настраивает необязательные зависимости обработчика.
+type Option func(*Processor)
+
+// WithMetrics подключает бизнес-метрики.
+func WithMetrics(m *observability.Business) Option {
+	return func(p *Processor) { p.metrics = m }
 }
 
 // HandleUpload строит миниатюры загруженной аватарки.
@@ -52,6 +69,8 @@ func NewProcessor(repo Repository, storage domain.ObjectStorage, maxPixels int64
 func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
 	ctx, span := observability.Tracer().Start(ctx, "avatar.process")
 	defer func() { observability.EndSpan(span, err) }()
+
+	started := time.Now()
 
 	event, err := rabbitmq.Decode[domain.AvatarUploadEvent](body)
 	if err != nil {
@@ -84,6 +103,7 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
 		// Событие пришло повторно — в трейсе это должно быть видно, иначе
 		// непонятно, почему спан короткий и без вложенной работы.
 		span.AddEvent("already processed, duplicate skipped")
+		p.metrics.ProcessingFinished(observability.ResultSkipped, started, 0)
 		log.InfoContext(ctx, "аватарка уже обработана, повтор пропущен")
 
 		return nil
@@ -102,6 +122,8 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
 		if statusErr := p.repo.SetProcessingStatus(ctx, avatarID, domain.ProcessingStatusFailed); statusErr != nil {
 			return statusErr
 		}
+
+		p.metrics.ProcessingFinished(observability.ResultError, started, 0)
 
 		return nil
 	}
@@ -123,6 +145,8 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
 	if err != nil {
 		return err
 	}
+
+	p.metrics.ProcessingFinished(observability.ResultOK, started, len(thumbnails))
 
 	log.InfoContext(ctx, "аватарка обработана",
 		"width", width, "height", height, "thumbnails", len(thumbnails), "updated", updated)

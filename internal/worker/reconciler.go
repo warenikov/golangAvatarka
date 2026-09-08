@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/services"
 )
 
@@ -14,6 +15,7 @@ const reconcileBatch = 100
 type Reconciler struct {
 	repo      Repository
 	publisher services.EventPublisher
+	metrics   *observability.Business
 	interval  time.Duration
 	age       time.Duration
 	log       *slog.Logger
@@ -30,6 +32,13 @@ func NewReconciler(
 	interval, age time.Duration, log *slog.Logger,
 ) *Reconciler {
 	return &Reconciler{repo: repo, publisher: publisher, interval: interval, age: age, log: log}
+}
+
+// WithMetrics подключает бизнес-метрики к реконсилятору.
+func (r *Reconciler) WithMetrics(m *observability.Business) *Reconciler {
+	r.metrics = m
+
+	return r
 }
 
 // Run работает до отмены контекста.
@@ -59,6 +68,10 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 
 		return
 	}
+
+	// Метрика ставится и при нуле: иначе после разбора завала график
+	// застынет на последнем ненулевом значении и алерт не погаснет.
+	r.metrics.BacklogSize(len(stuck))
 
 	if len(stuck) == 0 {
 		return

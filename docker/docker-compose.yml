@@ -76,6 +76,10 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       # Схему уже накатил сервис migrate.
       APP_AUTO_MIGRATE: "false"
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      TRACING_ENDPOINT: jaeger:4317
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1.0}
+      WORKER_ADMIN_ADDR: ":8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,7 +119,77 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # --- Наблюдаемость: профиль obs ---
+  # Вынесена в отдельный профиль намеренно: стек добавляет пять контейнеров,
+  # и обычная разработка не должна платить за них памятью на каждом up.
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["obs"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "4317:4317"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: ["obs"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: ["obs"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Анонимный просмотр: дашборды показывают только агрегаты, а ревьюеру
+      # не придётся искать пароль.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["obs"]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+
+  # Приёмник уведомлений: показывает тело алерта в своих логах.
+  # Настоящего канала доставки в учебном проекте нет, а проверить срабатывание
+  # правил нужно.
+  alert-sink:
+    image: mendhak/http-https-echo:35
+    profiles: ["obs"]
+    environment:
+      HTTP_PORT: "8080"
+
 volumes:
   pgdata:
   miniodata:
   rabbitdata:
+  promdata:
+  grafanadata:
