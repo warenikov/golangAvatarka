@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,7 +20,12 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "миграции не применены: %v\n", err)
+		// Логгером, а не в stderr: сборщик логов индексирует только JSON-строки
+		// с полем service, и обычный Fprintf не попал бы в OpenSearch —
+		// то есть причина падения терялась бы ровно тогда, когда нужна.
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+			With("service", "migrate").
+			Error("процесс остановлен с ошибкой", "err", err)
 		os.Exit(1)
 	}
 }

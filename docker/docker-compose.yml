@@ -76,6 +76,13 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       # Схему уже накатил сервис migrate.
       APP_AUTO_MIGRATE: "false"
+      # Выключен по умолчанию: Jaeger живёт в профиле obs, и при `make up-all`
+      # экспортёр бесконечно ретраил бы недоступный адрес, а остановка сервиса
+      # каждый раз ждала бы таймаута досылки. `make up-obs` включает его сам.
+      TRACING_ENABLED: ${TRACING_ENABLED:-false}
+      TRACING_ENDPOINT: ${TRACING_ENDPOINT:-jaeger:4317}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1.0}
+      WORKER_ADMIN_ADDR: ":8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,7 +122,141 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # --- Наблюдаемость: профиль obs ---
+  # Вынесена в отдельный профиль намеренно: стек добавляет пять контейнеров,
+  # и обычная разработка не должна платить за них памятью на каждом up.
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["obs"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "4317:4317"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: ["obs"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: ["obs"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Анонимный просмотр: дашборды показывают только агрегаты, а ревьюеру
+      # не придётся искать пароль.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+
+  opensearch:
+    image: opensearchproject/opensearch:2.18.0
+    profiles: ["obs"]
+    environment:
+      discovery.type: single-node
+      # Учебный контур: без TLS и учёток, иначе для проверки логов пришлось бы
+      # раздавать сертификаты по всем контейнерам.
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      bootstrap.memory_lock: "true"
+      # Полгигабайта хватает на учебный объём и не съедает машину разработчика.
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - opensearchdata:/usr/share/opensearch/data
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.18.0
+    profiles: ["obs"]
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  # Разовая задача: заводит шаблон индекса и шаблон поиска в Dashboards.
+  opensearch-init:
+    image: curlimages/curl:8.11.1
+    profiles: ["obs"]
+    restart: "no"
+    entrypoint: ["sh", "/config/init.sh"]
+    volumes:
+      - ./observability/opensearch:/config:ro
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.2.5
+    profiles: ["obs"]
+    volumes:
+      - ./observability/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./observability/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      # Логи контейнеров читаются с хоста только на чтение.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - fluentbitdata:/var/lib/fluent-bit
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["obs"]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+
+  # Приёмник уведомлений: показывает тело алерта в своих логах.
+  # Настоящего канала доставки в учебном проекте нет, а проверить срабатывание
+  # правил нужно.
+  alert-sink:
+    image: mendhak/http-https-echo:35
+    profiles: ["obs"]
+    environment:
+      HTTP_PORT: "8080"
+
 volumes:
   pgdata:
   miniodata:
   rabbitdata:
+  promdata:
+  grafanadata:
+  opensearchdata:
+  fluentbitdata:

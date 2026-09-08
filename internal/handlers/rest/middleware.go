@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-avatar-service/internal/observability"
 )
@@ -154,4 +156,29 @@ func rateLimiter(log *slog.Logger, requestsPerMinute int, keyFn httprate.KeyFunc
 // дорогая операция, и общий счётчик не даёт обойти лимит сменой точки входа.
 func UploadRateLimiter(log *slog.Logger, requestsPerMinute int) func(http.Handler) http.Handler {
 	return rateLimiter(log, requestsPerMinute, clientIPKey)
+}
+
+// TraceRoute переименовывает спан HTTP-запроса в "METHOD /шаблон/пути".
+//
+// otelhttp называет спан до маршрутизации, когда шаблон ещё неизвестен,
+// поэтому все запросы попадали бы в Jaeger под одним именем. Шаблон, а не сам
+// путь: иначе на каждую аватарку заводится отдельная операция и поиск по
+// трейсам превращается в перебор.
+func TraceRoute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+
+		route := chi.RouteContext(r.Context()).RoutePattern()
+		if route == "" {
+			return
+		}
+
+		span := trace.SpanFromContext(r.Context())
+		if !span.IsRecording() {
+			return
+		}
+
+		span.SetName(r.Method + " " + route)
+		span.SetAttributes(semconv.HTTPRoute(route))
+	})
 }

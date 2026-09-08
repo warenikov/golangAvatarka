@@ -10,9 +10,12 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 )
 
 const codeNoSuchKey = "NoSuchKey"
@@ -65,12 +68,20 @@ func (s *Storage) ensureBucket(ctx context.Context, region string) error {
 }
 
 // Put загружает объект в хранилище потоком, не читая его целиком в память.
-func (s *Storage) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
-	if err := validateKey(key); err != nil {
+func (s *Storage) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) (err error) {
+	ctx, span := s.startSpan(ctx, "s3.put", key)
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(
+		attribute.Int64("s3.object_size", size),
+		attribute.String("s3.content_type", contentType),
+	)
+
+	if err = validateKey(key); err != nil {
 		return err
 	}
 
-	_, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{
+	_, err = s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{
 		ContentType: contentType,
 	})
 	if err != nil {
@@ -81,8 +92,13 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader, size int64, 
 }
 
 // Get возвращает объект из хранилища. Вызывающий обязан закрыть Body.
-func (s *Storage) Get(ctx context.Context, key string) (*domain.Object, error) {
-	if err := validateKey(key); err != nil {
+func (s *Storage) Get(ctx context.Context, key string) (_ *domain.Object, err error) {
+	ctx, span := s.startSpan(ctx, "s3.get", key)
+	// Спан закрывается здесь, хотя тело объекта читают позже: замерять чтение
+	// клиентом было бы неверно — это уже не время хранилища.
+	defer func() { observability.EndSpan(span, err) }()
+
+	if err = validateKey(key); err != nil {
 		return nil, err
 	}
 
@@ -102,6 +118,8 @@ func (s *Storage) Get(ctx context.Context, key string) (*domain.Object, error) {
 		return nil, fmt.Errorf("stat object %s: %w", key, err)
 	}
 
+	span.SetAttributes(attribute.Int64("s3.object_size", info.Size))
+
 	return &domain.Object{
 		Body:        obj,
 		ContentType: info.ContentType,
@@ -111,8 +129,11 @@ func (s *Storage) Get(ctx context.Context, key string) (*domain.Object, error) {
 }
 
 // Delete удаляет объект. Удаление отсутствующего объекта считается успехом.
-func (s *Storage) Delete(ctx context.Context, key string) error {
-	if err := validateKey(key); err != nil {
+func (s *Storage) Delete(ctx context.Context, key string) (err error) {
+	ctx, span := s.startSpan(ctx, "s3.delete", key)
+	defer func() { observability.EndSpan(span, err) }()
+
+	if err = validateKey(key); err != nil {
 		return err
 	}
 
@@ -128,7 +149,15 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 }
 
 // DeleteMany удаляет набор объектов одним пакетом.
-func (s *Storage) DeleteMany(ctx context.Context, keys []string) error {
+func (s *Storage) DeleteMany(ctx context.Context, keys []string) (err error) {
+	ctx, span := observability.Tracer().Start(ctx, "s3.delete_many")
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(
+		attribute.String("s3.bucket", s.bucket),
+		attribute.Int("s3.object_count", len(keys)),
+	)
+
 	if len(keys) == 0 {
 		return nil
 	}
@@ -174,4 +203,19 @@ func isNotFound(err error) bool {
 	code := minio.ToErrorResponse(err).Code
 
 	return code == codeNoSuchKey
+}
+
+// startSpan открывает спан операции с объектом.
+//
+// Ключ кладётся в атрибут целиком, а имя спана остаётся общим для операции:
+// иначе на каждую аватарку в Jaeger появляется своя операция и список
+// становится бесполезным.
+func (s *Storage) startSpan(ctx context.Context, name, key string) (context.Context, trace.Span) {
+	ctx, span := observability.Tracer().Start(ctx, name)
+	span.SetAttributes(
+		attribute.String("s3.bucket", s.bucket),
+		attribute.String("s3.key", key),
+	)
+
+	return ctx, span
 }

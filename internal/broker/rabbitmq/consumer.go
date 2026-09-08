@@ -8,6 +8,9 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/codes"
+
+	"go-avatar-service/internal/observability"
 )
 
 const deathReasonRejected = "rejected"
@@ -38,6 +41,7 @@ type Consumer struct {
 	exchange   string
 	prefetch   int
 	maxRetries int
+	metrics    *observability.Business
 	log        *slog.Logger
 }
 
@@ -62,6 +66,13 @@ func NewConsumer(conn *Connection, prefetch, maxRetries int, log *slog.Logger) (
 		maxRetries: maxRetries,
 		log:        log,
 	}, nil
+}
+
+// WithMetrics подключает бизнес-метрики к потребителю.
+func (c *Consumer) WithMetrics(m *observability.Business) *Consumer {
+	c.metrics = m
+
+	return c
 }
 
 // Close закрывает канал потребителя.
@@ -103,15 +114,30 @@ func (c *Consumer) Consume(ctx context.Context, queue string, handle Handler) er
 				return nil
 			}
 
-			c.handleDelivery(ctx, log, delivery, handle)
+			c.handleDelivery(ctx, log, queue, delivery, handle)
 		}
 	}
 }
 
-func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.Delivery, handle Handler) {
+func (c *Consumer) handleDelivery(
+	ctx context.Context, log *slog.Logger, queue string, d amqp.Delivery, handle Handler,
+) {
+	// Спан продолжает трейс, начатый публикацией: контекст приехал
+	// в заголовках сообщения. С этого места и логи воркера получают тот же
+	// trace_id, что и HTTP-запрос пользователя.
+	ctx, span := startConsumeSpan(ctx, queue, d)
+	defer span.End()
+
 	log = log.With("message_id", d.MessageId, "attempt", deathCount(d)+1)
 
 	err := handle(ctx, d.Body)
+	if err != nil {
+		// Статус ставится на любом отказе, а не только при исчерпании попыток:
+		// иначе поиск в Jaeger по ошибочным спанам пропускает почти все сбои —
+		// до очереди разбора сообщение доходит лишь после maxRetries попыток.
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	if err == nil {
 		if ackErr := d.Ack(false); ackErr != nil {
 			log.ErrorContext(ctx, "не удалось подтвердить сообщение", "err", ackErr)
@@ -121,6 +147,7 @@ func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.
 	}
 
 	if deathCount(d) >= int64(c.maxRetries) {
+		c.metrics.EventDeadLettered()
 		log.ErrorContext(ctx, "исчерпаны попытки, сообщение уходит в очередь разбора", "err", err)
 		c.toDeadLetter(ctx, log, d)
 

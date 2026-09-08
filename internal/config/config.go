@@ -32,6 +32,7 @@ type Config struct {
 	S3       S3
 	RabbitMQ RabbitMQ
 	Worker   Worker
+	Tracing  Tracing
 }
 
 type App struct {
@@ -82,9 +83,20 @@ type RabbitMQ struct {
 	Prefetch     int           `env:"RABBITMQ_PREFETCH" envDefault:"4"`
 }
 
+type Tracing struct {
+	Enabled bool `env:"TRACING_ENABLED" envDefault:"true"`
+	// Адрес OTLP-приёмника по gRPC. У Jaeger это порт 4317.
+	Endpoint string `env:"TRACING_ENDPOINT" envDefault:"localhost:4317"`
+	// Доля трейсов, попадающих в хранилище. На проде полный сбор слишком дорог,
+	// в разработке нужен каждый запрос.
+	SampleRatio float64 `env:"TRACING_SAMPLE_RATIO" envDefault:"1.0"`
+}
+
 type Worker struct {
 	ReconcileInterval time.Duration `env:"WORKER_RECONCILE_INTERVAL" envDefault:"1m"`
 	ReconcileAge      time.Duration `env:"WORKER_RECONCILE_AGE" envDefault:"5m"`
+	// Служебный адрес воркера: /metrics и /health. Наружу не публикуется.
+	AdminAddr string `env:"WORKER_ADMIN_ADDR" envDefault:":8081"`
 }
 
 // Load читает файл .env, если он существует, разбирает переменные окружения и проверяет значения.
@@ -138,6 +150,16 @@ func (c *Config) Validate() error {
 	}
 	if len(c.App.CORSOrigins) == 0 {
 		errs = append(errs, errors.New("APP_CORS_ORIGINS: список пуст"))
+	}
+	if c.Worker.AdminAddr == "" {
+		errs = append(errs, errors.New("WORKER_ADMIN_ADDR: пустой адрес"))
+	}
+	if c.Tracing.Enabled && c.Tracing.Endpoint == "" {
+		errs = append(errs, errors.New("TRACING_ENDPOINT: пустой адрес при включённом трейсинге"))
+	}
+	if c.Tracing.SampleRatio < 0 || c.Tracing.SampleRatio > 1 {
+		errs = append(errs, fmt.Errorf("TRACING_SAMPLE_RATIO: ожидается доля от 0 до 1, получено %v",
+			c.Tracing.SampleRatio))
 	}
 	if c.DB.Port < 1 || c.DB.Port > 65535 {
 		errs = append(errs, fmt.Errorf("DB_PORT: вне диапазона 1-65535: %d", c.DB.Port))

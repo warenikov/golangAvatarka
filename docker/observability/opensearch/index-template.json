@@ -1,0 +1,33 @@
+{
+  "index_patterns": ["gophprofile-logs-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s"
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "trace_id":   { "type": "keyword" },
+        "span_id":    { "type": "keyword" },
+        "request_id": { "type": "keyword" },
+        "service":    { "type": "keyword" },
+        "level":      { "type": "keyword" },
+        "component":  { "type": "keyword" },
+        "method":     { "type": "keyword" },
+        "path":       { "type": "keyword" },
+        "status":     { "type": "short" },
+        "duration_ms":{ "type": "long" },
+        "bytes":      { "type": "long" },
+        "avatar_id":  { "type": "keyword" },
+        "err":        { "type": "text" },
+        "msg":        { "type": "text" }
+      }
+    }
+  },
+  "priority": 100,
+  "_meta": {
+    "description": "Логи GophProfile. trace_id и service — keyword: по ним фильтруют, а не ищут по словам."
+  }
+}

@@ -23,5 +23,7 @@ func New(level string, w io.Writer) (*slog.Logger, error) {
 		return nil, fmt.Errorf("неизвестный уровень логирования %q", level)
 	}
 
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})), nil
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})
+
+	return slog.New(newTraceHandler(handler)), nil
 }

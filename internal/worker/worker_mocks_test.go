@@ -40,6 +40,72 @@ func (_m *MockRepository) EXPECT() *MockRepository_Expecter {
 	return &MockRepository_Expecter{mock: &_m.Mock}
 }
 
+// CountPendingOlderThan provides a mock function for the type MockRepository
+func (_mock *MockRepository) CountPendingOlderThan(ctx context.Context, age time.Duration) (int, error) {
+	ret := _mock.Called(ctx, age)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CountPendingOlderThan")
+	}
+
+	var r0 int
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, time.Duration) (int, error)); ok {
+		return returnFunc(ctx, age)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, time.Duration) int); ok {
+		r0 = returnFunc(ctx, age)
+	} else {
+		r0 = ret.Get(0).(int)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, time.Duration) error); ok {
+		r1 = returnFunc(ctx, age)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockRepository_CountPendingOlderThan_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CountPendingOlderThan'
+type MockRepository_CountPendingOlderThan_Call struct {
+	*mock.Call
+}
+
+// CountPendingOlderThan is a helper method to define mock.On call
+//   - ctx context.Context
+//   - age time.Duration
+func (_e *MockRepository_Expecter) CountPendingOlderThan(ctx interface{}, age interface{}) *MockRepository_CountPendingOlderThan_Call {
+	return &MockRepository_CountPendingOlderThan_Call{Call: _e.mock.On("CountPendingOlderThan", ctx, age)}
+}
+
+func (_c *MockRepository_CountPendingOlderThan_Call) Run(run func(ctx context.Context, age time.Duration)) *MockRepository_CountPendingOlderThan_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 time.Duration
+		if args[1] != nil {
+			arg1 = args[1].(time.Duration)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockRepository_CountPendingOlderThan_Call) Return(n int, err error) *MockRepository_CountPendingOlderThan_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockRepository_CountPendingOlderThan_Call) RunAndReturn(run func(ctx context.Context, age time.Duration) (int, error)) *MockRepository_CountPendingOlderThan_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetByID provides a mock function for the type MockRepository
 func (_mock *MockRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
 	ret := _mock.Called(ctx, id)

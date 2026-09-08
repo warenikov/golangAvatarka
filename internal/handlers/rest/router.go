@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"go-avatar-service/internal/config"
 	webui "go-avatar-service/internal/handlers/web"
@@ -39,6 +40,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	app := deps.Config.App
 
 	r.Use(middleware.RequestID)
+	// Трейсинг стоит выше логов и метрик: тогда trace_id попадает и в запись
+	// лога о запросе, и спан покрывает всю обработку целиком.
+	r.Use(otelhttp.NewMiddleware(deps.Config.App.Version))
+	r.Use(TraceRoute)
 	r.Use(Recoverer(deps.Log))
 	r.Use(RequestLogger(deps.Log))
 	r.Use(Metrics(deps.Metrics))

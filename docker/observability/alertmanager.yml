@@ -1,0 +1,28 @@
+# Получателя настоящих уведомлений в учебном проекте нет, поэтому алерты
+# складываются в webhook-приёмник: видно, что правило сработало, и не нужен
+# ни почтовый сервер, ни внешний мессенджер.
+route:
+  receiver: default
+  group_by: [alertname, severity]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: default
+      group_wait: 0s
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: http://alert-sink:8080/
+        send_resolved: true
+
+inhibit_rules:
+  # Пока сервис лежит целиком, отдельные алерты про ошибки шумят впустую.
+  - source_matchers:
+      - alertname = "ServiceDown"
+    target_matchers:
+      - severity = "warning"
+    equal: [service]
