@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,7 +31,12 @@ const (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "сервер остановлен с ошибкой: %v\n", err)
+		// Логгером, а не в stderr: сборщик логов индексирует только JSON-строки
+		// с полем service, и обычный Fprintf не попал бы в OpenSearch —
+		// то есть причина падения терялась бы ровно тогда, когда нужна.
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+			With("service", "server").
+			Error("процесс остановлен с ошибкой", "err", err)
 		os.Exit(1)
 	}
 }

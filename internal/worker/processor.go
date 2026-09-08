@@ -30,6 +30,7 @@ type Repository interface {
 	UpdateProcessingResult(ctx context.Context, id uuid.UUID, thumbnails map[string]string, width, height int) (bool, error)
 	SetProcessingStatus(ctx context.Context, id uuid.UUID, status domain.ProcessingStatus) error
 	ListPendingOlderThan(ctx context.Context, age time.Duration, limit int) ([]domain.Avatar, error)
+	CountPendingOlderThan(ctx context.Context, age time.Duration) (int, error)
 }
 
 type Processor struct {
@@ -68,9 +69,19 @@ func WithMetrics(m *observability.Business) Option {
 // со статусом completed.
 func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
 	ctx, span := observability.Tracer().Start(ctx, "avatar.process")
-	defer func() { observability.EndSpan(span, err) }()
-
 	started := time.Now()
+
+	// Счётчик отказов ведётся здесь, а не по месту каждого return: иначе
+	// метрика считает только нераспознанные картинки, а недоступность базы
+	// или хранилища проходит мимо неё — и график отказов остаётся пустым
+	// ровно во время аварии.
+	defer func() {
+		observability.EndSpan(span, err)
+
+		if err != nil {
+			p.metrics.ProcessingFinished(observability.ResultError, started, 0)
+		}
+	}()
 
 	event, err := rabbitmq.Decode[domain.AvatarUploadEvent](body)
 	if err != nil {

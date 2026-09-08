@@ -114,23 +114,29 @@ func (c *Consumer) Consume(ctx context.Context, queue string, handle Handler) er
 				return nil
 			}
 
-			c.handleDelivery(ctx, log, delivery, handle)
+			c.handleDelivery(ctx, log, queue, delivery, handle)
 		}
 	}
 }
 
-func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.Delivery, handle Handler) {
+func (c *Consumer) handleDelivery(
+	ctx context.Context, log *slog.Logger, queue string, d amqp.Delivery, handle Handler,
+) {
 	// Спан продолжает трейс, начатый публикацией: контекст приехал
 	// в заголовках сообщения. С этого места и логи воркера получают тот же
 	// trace_id, что и HTTP-запрос пользователя.
-	ctx, span := startConsumeSpan(ctx, c.queueName(d), d)
+	ctx, span := startConsumeSpan(ctx, queue, d)
 	defer span.End()
 
 	log = log.With("message_id", d.MessageId, "attempt", deathCount(d)+1)
 
 	err := handle(ctx, d.Body)
 	if err != nil {
+		// Статус ставится на любом отказе, а не только при исчерпании попыток:
+		// иначе поиск в Jaeger по ошибочным спанам пропускает почти все сбои —
+		// до очереди разбора сообщение доходит лишь после maxRetries попыток.
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	if err == nil {
 		if ackErr := d.Ack(false); ackErr != nil {
@@ -141,7 +147,6 @@ func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.
 	}
 
 	if deathCount(d) >= int64(c.maxRetries) {
-		span.SetStatus(codes.Error, "retries exhausted")
 		c.metrics.EventDeadLettered()
 		log.ErrorContext(ctx, "исчерпаны попытки, сообщение уходит в очередь разбора", "err", err)
 		c.toDeadLetter(ctx, log, d)
@@ -226,15 +231,4 @@ func Decode[T any](body []byte) (T, error) {
 	}
 
 	return payload, nil
-}
-
-// queueName возвращает очередь, из которой пришло сообщение.
-// В спане важно имя очереди, а не consumer tag: тег уникален на подключение
-// и в Jaeger дробил бы одну операцию на множество.
-func (c *Consumer) queueName(d amqp.Delivery) string {
-	if d.RoutingKey != "" {
-		return d.RoutingKey
-	}
-
-	return d.ConsumerTag
 }

@@ -273,3 +273,20 @@ func unmarshalThumbnails(b []byte) (map[string]string, error) {
 
 	return m, nil
 }
+
+// CountPendingOlderThan считает аватарки, застрявшие в ожидании обработки.
+//
+// Отдельный запрос нужен потому, что ListPendingOlderThan ограничен размером
+// пачки: показывать в метрике отставания её потолок значит не отличать
+// небольшую задержку от полной остановки воркера.
+func (r *AvatarRepository) CountPendingOlderThan(ctx context.Context, age time.Duration) (int, error) {
+	q := `SELECT count(*) FROM avatars
+		WHERE processing_status = $1 AND deleted_at IS NULL AND created_at < $2`
+
+	var count int
+	if err := r.pool.QueryRow(ctx, q, domain.ProcessingStatusPending, time.Now().Add(-age)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count pending avatars: %w", err)
+	}
+
+	return count, nil
+}

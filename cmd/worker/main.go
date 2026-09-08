@@ -27,7 +27,12 @@ const healthTimeout = 2 * time.Second
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "воркер остановлен с ошибкой: %v\n", err)
+		// Логгером, а не в stderr: сборщик логов индексирует только JSON-строки
+		// с полем service, и обычный Fprintf не попал бы в OpenSearch —
+		// то есть причина падения терялась бы ровно тогда, когда нужна.
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+			With("service", "worker").
+			Error("процесс остановлен с ошибкой", "err", err)
 		os.Exit(1)
 	}
 }
@@ -137,7 +142,8 @@ func run() error {
 	group.Go(func() error { return reconciler.Run(groupCtx) })
 
 	// Служебный сервер: без него метрики воркера снять неоткуда.
-	admin := observability.NewServer(cfg.Worker.AdminAddr, registry, workerHealth(pool, storage, conn), log)
+	admin := observability.NewServer(cfg.Worker.AdminAddr, registry,
+		workerHealth(cfg, log.With("component", "health"), pool, storage, conn), log)
 	group.Go(func() error {
 		admin.Run(groupCtx)
 
@@ -160,14 +166,21 @@ func run() error {
 // Воркер не принимает трафик, поэтому проверка нужна не балансировщику,
 // а оркестратору: без неё зависший на мёртвом соединении процесс выглядит
 // живым и очередь молча копится.
-func workerHealth(pool *pgxpool.Pool, storage *s3.Storage, conn *rabbitmq.Connection) http.HandlerFunc {
+func workerHealth(
+	cfg *config.Config, log *slog.Logger,
+	pool *pgxpool.Pool, storage *s3.Storage, conn *rabbitmq.Connection,
+) http.HandlerFunc {
 	checkers := []rest.Checker{
 		postgres.NewHealthChecker(pool),
 		s3.NewHealthChecker(storage),
 		rabbitmq.NewHealthChecker(conn),
 	}
 
-	handler := rest.NewHealthHandler(slog.Default(), "worker", healthTimeout, false, checkers...)
+	// Логгер именно наш, а не slog.Default(): стандартный пишет текстом в stderr,
+	// без уровня из конфига и без trace_id, и такие строки не проходят разбор
+	// в конвейере логов — диагностика воркера просто не доезжала бы до OpenSearch.
+	// Причина отказа раскрывается по тому же правилу, что и у сервера.
+	handler := rest.NewHealthHandler(log, cfg.App.Version, healthTimeout, !cfg.IsProd(), checkers...)
 
 	return handler.Handle
 }

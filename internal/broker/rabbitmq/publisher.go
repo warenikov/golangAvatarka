@@ -28,7 +28,6 @@ func NewPublisher(conn *Connection) (*Publisher, error) {
 	return &Publisher{conn: conn}, nil
 }
 
-// PublishUpload отправляет событие о загруженной аватарке.
 // WithMetrics подключает бизнес-метрики к издателю.
 func (p *Publisher) WithMetrics(m *observability.Business) *Publisher {
 	p.metrics = m
@@ -36,6 +35,7 @@ func (p *Publisher) WithMetrics(m *observability.Business) *Publisher {
 	return p
 }
 
+// PublishUpload отправляет событие о загруженной аватарке.
 func (p *Publisher) PublishUpload(ctx context.Context, event domain.AvatarUploadEvent) error {
 	return p.publishTracked(ctx, RoutingUploaded, observability.EventUpload, event.AvatarID, event)
 }

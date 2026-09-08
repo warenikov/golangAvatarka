@@ -76,8 +76,11 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       # Схему уже накатил сервис migrate.
       APP_AUTO_MIGRATE: "false"
-      TRACING_ENABLED: ${TRACING_ENABLED:-true}
-      TRACING_ENDPOINT: jaeger:4317
+      # Выключен по умолчанию: Jaeger живёт в профиле obs, и при `make up-all`
+      # экспортёр бесконечно ретраил бы недоступный адрес, а остановка сервиса
+      # каждый раз ждала бы таймаута досылки. `make up-obs` включает его сам.
+      TRACING_ENABLED: ${TRACING_ENABLED:-false}
+      TRACING_ENDPOINT: ${TRACING_ENDPOINT:-jaeger:4317}
       TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1.0}
       WORKER_ADMIN_ADDR: ":8081"
     depends_on:

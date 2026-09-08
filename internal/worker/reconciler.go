@@ -69,9 +69,7 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 		return
 	}
 
-	// Метрика ставится и при нуле: иначе после разбора завала график
-	// застынет на последнем ненулевом значении и алерт не погаснет.
-	r.metrics.BacklogSize(len(stuck))
+	r.reportBacklog(ctx)
 
 	if len(stuck) == 0 {
 		return
@@ -93,4 +91,21 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 				"avatar_id", avatar.ID, "err", err)
 		}
 	}
+}
+
+// reportBacklog сообщает размер отставания отдельным запросом.
+//
+// Размер выборки для переиздания ограничен пачкой, и брать её длину за метрику
+// значило бы упереться в потолок: и десять застрявших аватарок, и десять тысяч
+// выглядели бы одинаково. Значение ставится и при нуле — иначе после разбора
+// завала график застынет на последнем ненулевом и алерт не погаснет.
+func (r *Reconciler) reportBacklog(ctx context.Context) {
+	count, err := r.repo.CountPendingOlderThan(ctx, r.age)
+	if err != nil {
+		r.log.ErrorContext(ctx, "не удалось посчитать отставание очереди", "err", err)
+
+		return
+	}
+
+	r.metrics.BacklogSize(count)
 }

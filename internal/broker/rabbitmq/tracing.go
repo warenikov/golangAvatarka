@@ -76,31 +76,46 @@ func startPublishSpan(ctx context.Context, exchange, routingKey, messageID strin
 	return ctx, span
 }
 
-// startConsumeSpan продолжает трейс, начатый публикацией.
+// startConsumeSpan привязывает обработку к трейсу, породившему событие.
 //
-// Родитель берётся из заголовков сообщения, поэтому обработка в воркере
-// оказывается частью того же трейса, что и HTTP-запрос, породивший событие.
-// Если заголовков нет — например, сообщение переиздал реконсилятор спустя
-// минуты, — начинается новый трейс, связанный с исходным ссылкой: делать
-// потомком спан, который завершился давно, значит рисовать в Jaeger
-// многоминутные разрывы.
+// Первая доставка становится потомком спана публикации: HTTP-запрос и работа
+// воркера оказываются одним трейсом, и в Jaeger видна полная картина запроса.
+//
+// Повторная доставка — другое дело. Сообщение возвращается через очередь
+// ретраев с TTL, то есть спустя десятки секунд или минуты, но заголовок
+// traceparent в нём прежний. Сделать такую обработку потомком значило бы
+// пририсовать к давно закрытому спану многоминутный хвост и растить один
+// трейс с каждой попыткой. Поэтому повтор начинает свой трейс и связывается
+// с исходным ссылкой: связь сохраняется, а длительности остаются честными.
+//
+// Сообщение вовсе без контекста — например, переизданное реконсилятором —
+// тоже начинает трейс заново, связывать его не с чем.
 func startConsumeSpan(ctx context.Context, queue string, d amqp.Delivery) (context.Context, trace.Span) {
-	carrier := headerCarrier(d.Headers)
-	parent := otel.GetTextMapPropagator().Extract(ctx, carrier)
+	attempt := deathCount(d) + 1
 
-	opts := []trace.SpanStartOption{
+	opts := make([]trace.SpanStartOption, 0, 3)
+	opts = append(opts,
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
 			semconv.MessagingSystemRabbitMQ,
 			semconv.MessagingDestinationName(queue),
 			semconv.MessagingMessageID(d.MessageId),
-			attribute.Int64("messaging.rabbitmq.delivery_attempt", deathCount(d)+1),
+			attribute.Int64("messaging.rabbitmq.delivery_attempt", attempt),
 		),
+	)
+
+	parentCtx := otel.GetTextMapPropagator().Extract(ctx, headerCarrier(d.Headers))
+
+	origin := trace.SpanContextFromContext(parentCtx)
+	if !origin.IsValid() {
+		return observability.Tracer().Start(ctx, "consume "+queue, opts...)
 	}
 
-	if link := trace.SpanContextFromContext(parent); link.IsValid() {
-		return observability.Tracer().Start(parent, "consume "+queue, opts...)
+	if attempt == 1 {
+		return observability.Tracer().Start(parentCtx, "consume "+queue, opts...)
 	}
+
+	opts = append(opts, trace.WithLinks(trace.Link{SpanContext: origin}))
 
 	return observability.Tracer().Start(ctx, "consume "+queue, opts...)
 }

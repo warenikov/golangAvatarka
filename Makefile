@@ -37,7 +37,7 @@ up-all: ## Поднять всё, включая server и worker в конте�
 	$(COMPOSE) --profile app up -d --build
 
 up-obs: ## Поднять всё вместе с наблюдаемостью: Jaeger, Prometheus, Grafana, алерты
-	$(COMPOSE) --profile app --profile obs up -d --build
+	TRACING_ENABLED=true $(COMPOSE) --profile app --profile obs up -d --build
 
 logs-obs: ## Логи стека наблюдаемости
 	$(COMPOSE) --profile obs logs -f

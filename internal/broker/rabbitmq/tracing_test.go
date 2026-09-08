@@ -111,6 +111,48 @@ func TestInjectTraceKeepsExistingHeaders(t *testing.T) {
 	assert.Contains(t, headers, "traceparent")
 }
 
+// Повторная доставка приходит через очередь ретраев с TTL, спустя минуты,
+// но с прежним traceparent. Потомком её делать нельзя: спан-родитель давно
+// закрыт, и трейс распух бы на каждую попытку.
+func TestRetryLinksInsteadOfNesting(t *testing.T) {
+	withTracing(t)
+
+	producerCtx, producerSpan := otel.Tracer("test").Start(t.Context(), "http request")
+	defer producerSpan.End()
+
+	originTraceID := producerSpan.SpanContext().TraceID()
+	headers := injectTrace(producerCtx, nil)
+
+	// Вторая попытка: RabbitMQ проставил x-death со счётчиком отказов.
+	headers["x-death"] = []any{amqp.Table{"reason": deathReasonRejected, "count": int64(1)}}
+
+	_, retrySpan := startConsumeSpan(context.Background(), "avatars.process", amqp.Delivery{
+		Headers:   headers,
+		MessageId: "avatar-retry",
+	})
+	defer retrySpan.End()
+
+	assert.NotEqual(t, originTraceID, retrySpan.SpanContext().TraceID(),
+		"повтор должен начинать свой трейс, а не продолжать давно закрытый")
+	assert.True(t, retrySpan.SpanContext().IsValid())
+}
+
+// Первая доставка — наоборот, обязана быть частью исходного трейса.
+func TestFirstDeliveryContinuesTrace(t *testing.T) {
+	withTracing(t)
+
+	producerCtx, producerSpan := otel.Tracer("test").Start(t.Context(), "http request")
+	defer producerSpan.End()
+
+	_, consumerSpan := startConsumeSpan(context.Background(), "avatars.process", amqp.Delivery{
+		Headers:   injectTrace(producerCtx, nil),
+		MessageId: "avatar-first",
+	})
+	defer consumerSpan.End()
+
+	assert.Equal(t, producerSpan.SpanContext().TraceID(), consumerSpan.SpanContext().TraceID())
+}
+
 func TestConsumeSpanCarriesAttempt(t *testing.T) {
 	withTracing(t)
 
