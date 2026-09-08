@@ -17,6 +17,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"go-avatar-service/internal/handlers/rest"
 	"go-avatar-service/internal/observability"
@@ -280,4 +282,77 @@ func TestResponderErrorFormat(t *testing.T) {
 
 	assert.Contains(t, rec.Header().Get("Content-Type"), "application/json")
 	assert.True(t, strings.HasSuffix(rec.Body.String(), "\n"))
+}
+
+// otelhttp называет спан до маршрутизации, когда шаблон пути ещё неизвестен.
+// Без переименования все запросы попадают в Jaeger под одним именем.
+func TestTraceRouteRenamesSpanToRoutePattern(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx, span := provider.Tracer("test").Start(req.Context(), "HTTP GET")
+			defer span.End()
+
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	r.Use(rest.TraceRoute)
+	r.Get("/api/v1/avatars/{avatar_id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/avatars/42", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+
+	assert.Equal(t, "GET /api/v1/avatars/{avatar_id}", spans[0].Name,
+		"имя спана — шаблон маршрута, иначе на каждую аватарку заводится своя операция")
+
+	var route string
+	for _, attr := range spans[0].Attributes {
+		if attr.Key == "http.route" {
+			route = attr.Value.AsString()
+		}
+	}
+
+	assert.Equal(t, "/api/v1/avatars/{avatar_id}", route)
+}
+
+// Несопоставленный путь шаблона не имеет — переименовывать нечего,
+// и middleware обязан промолчать, а не подставить пустое имя.
+func TestTraceRouteKeepsNameWhenRouteUnknown(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx, span := provider.Tracer("test").Start(req.Context(), "HTTP GET")
+			defer span.End()
+
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	r.Use(rest.TraceRoute)
+	r.Get("/health", func(http.ResponseWriter, *http.Request) {})
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/нет-такого", nil))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "HTTP GET", spans[0].Name)
 }
