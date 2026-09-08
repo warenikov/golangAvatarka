@@ -8,6 +8,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const deathReasonRejected = "rejected"
@@ -109,9 +110,18 @@ func (c *Consumer) Consume(ctx context.Context, queue string, handle Handler) er
 }
 
 func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.Delivery, handle Handler) {
+	// Спан продолжает трейс, начатый публикацией: контекст приехал
+	// в заголовках сообщения. С этого места и логи воркера получают тот же
+	// trace_id, что и HTTP-запрос пользователя.
+	ctx, span := startConsumeSpan(ctx, c.queueName(d), d)
+	defer span.End()
+
 	log = log.With("message_id", d.MessageId, "attempt", deathCount(d)+1)
 
 	err := handle(ctx, d.Body)
+	if err != nil {
+		span.RecordError(err)
+	}
 	if err == nil {
 		if ackErr := d.Ack(false); ackErr != nil {
 			log.ErrorContext(ctx, "не удалось подтвердить сообщение", "err", ackErr)
@@ -121,6 +131,7 @@ func (c *Consumer) handleDelivery(ctx context.Context, log *slog.Logger, d amqp.
 	}
 
 	if deathCount(d) >= int64(c.maxRetries) {
+		span.SetStatus(codes.Error, "retries exhausted")
 		log.ErrorContext(ctx, "исчерпаны попытки, сообщение уходит в очередь разбора", "err", err)
 		c.toDeadLetter(ctx, log, d)
 
@@ -204,4 +215,15 @@ func Decode[T any](body []byte) (T, error) {
 	}
 
 	return payload, nil
+}
+
+// queueName возвращает очередь, из которой пришло сообщение.
+// В спане важно имя очереди, а не consumer tag: тег уникален на подключение
+// и в Jaeger дробил бы одну операцию на множество.
+func (c *Consumer) queueName(d amqp.Delivery) string {
+	if d.RoutingKey != "" {
+		return d.RoutingKey
+	}
+
+	return d.ConsumerTag
 }

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 )
 
 // orphanCleanupTimeout ограничивает уборку файла, оставшегося без метаданных.
@@ -56,15 +58,27 @@ func NewAvatarService(
 }
 
 // Upload сохраняет файл в хранилище, заводит метаданные и ставит задачу на обработку.
-func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Avatar, error) {
-	if err := domain.ValidateUserID(in.UserID); err != nil {
+func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (_ *domain.Avatar, err error) {
+	ctx, span := observability.Tracer().Start(ctx, "avatar.upload")
+	defer func() { observability.EndSpan(span, err) }()
+
+	if err = domain.ValidateUserID(in.UserID); err != nil {
 		return nil, err
 	}
 
 	avatarID := uuid.New()
 	key := domain.OriginalObjectKey(in.UserID, avatarID)
 
-	if err := s.storage.Put(ctx, key, in.Body, in.Size, in.MimeType); err != nil {
+	// Идентификаторы в атрибутах: по ним в Jaeger находят трейс конкретной
+	// загрузки, когда пользователь жалуется на одну свою аватарку.
+	span.SetAttributes(
+		attribute.String("avatar.id", avatarID.String()),
+		attribute.String("avatar.user_id", in.UserID),
+		attribute.String("avatar.mime", in.MimeType),
+		attribute.Int64("avatar.size_bytes", in.Size),
+	)
+
+	if err = s.storage.Put(ctx, key, in.Body, in.Size, in.MimeType); err != nil {
 		return nil, fmt.Errorf("upload avatar: %w", err)
 	}
 
@@ -80,7 +94,7 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Ava
 		ProcessingStatus: domain.ProcessingStatusPending,
 	}
 
-	if err := s.repo.Create(ctx, avatar); err != nil {
+	if err = s.repo.Create(ctx, avatar); err != nil {
 		s.removeOrphan(ctx, key, avatarID)
 
 		return nil, fmt.Errorf("upload avatar: %w", err)
@@ -92,7 +106,7 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (*domain.Ava
 		S3Key:    key,
 	}
 
-	if err := s.publisher.PublishUpload(ctx, event); err != nil {
+	if err = s.publisher.PublishUpload(ctx, event); err != nil {
 		s.log.ErrorContext(ctx, "событие загрузки не опубликовано",
 			"avatar_id", avatarID, "err", err)
 	}
@@ -123,7 +137,15 @@ func (s *AvatarService) removeOrphan(ctx context.Context, key string, avatarID u
 // Метаданные и содержимое разделены намеренно: ETag считается по метаданным,
 // и условный запрос с совпавшим If-None-Match должен отвечать 304, ни разу
 // не сходив в хранилище.
-func (s *AvatarService) Open(ctx context.Context, avatar *domain.Avatar, size string) (*domain.Object, error) {
+func (s *AvatarService) Open(ctx context.Context, avatar *domain.Avatar, size string) (_ *domain.Object, err error) {
+	ctx, span := observability.Tracer().Start(ctx, "avatar.open")
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", avatar.ID.String()),
+		attribute.String("avatar.size", size),
+	)
+
 	key := avatar.S3Key
 
 	if size != "" && size != domain.SizeOriginal {
@@ -135,6 +157,10 @@ func (s *AvatarService) Open(ctx context.Context, avatar *domain.Avatar, size st
 
 	obj, err := s.storage.Get(ctx, key)
 	if errors.Is(err, domain.ErrObjectNotFound) && key != avatar.S3Key {
+		// Откат на оригинал — не ошибка, но в трейсе это видно должно быть:
+		// иначе непонятно, почему клиенту ушёл не тот размер, что он просил.
+		span.AddEvent("thumbnail missing, falling back to original")
+
 		obj, err = s.storage.Get(ctx, avatar.S3Key)
 	}
 	if err != nil {
@@ -168,8 +194,16 @@ func (s *AvatarService) List(ctx context.Context, userID string) ([]domain.Avata
 }
 
 // Delete помечает аватарку удалённой и ставит задачу на удаление файлов.
-func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, userID string) error {
-	if err := domain.ValidateUserID(userID); err != nil {
+func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, userID string) (err error) {
+	ctx, span := observability.Tracer().Start(ctx, "avatar.delete")
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", id.String()),
+		attribute.String("avatar.user_id", userID),
+	)
+
+	if err = domain.ValidateUserID(userID); err != nil {
 		return err
 	}
 
@@ -177,6 +211,8 @@ func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, userID string)
 	if err != nil {
 		return err
 	}
+
+	span.SetAttributes(attribute.Int("avatar.deleted_objects", len(keys)))
 
 	event := domain.AvatarDeleteEvent{AvatarID: id.String(), S3Keys: keys}
 	if err = s.publisher.PublishDelete(ctx, event); err != nil {

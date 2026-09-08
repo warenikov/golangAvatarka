@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/services/imageproc"
 )
 
@@ -47,11 +49,19 @@ func NewProcessor(repo Repository, storage domain.ObjectStorage, maxPixels int64
 // Идемпотентен на трёх уровнях: уже обработанная аватарка пропускается сразу,
 // ключи миниатюр детерминированы, а запись результата в БД не трогает строку
 // со статусом completed.
-func (p *Processor) HandleUpload(ctx context.Context, body []byte) error {
+func (p *Processor) HandleUpload(ctx context.Context, body []byte) (err error) {
+	ctx, span := observability.Tracer().Start(ctx, "avatar.process")
+	defer func() { observability.EndSpan(span, err) }()
+
 	event, err := rabbitmq.Decode[domain.AvatarUploadEvent](body)
 	if err != nil {
 		return err
 	}
+
+	span.SetAttributes(
+		attribute.String("avatar.id", event.AvatarID),
+		attribute.String("avatar.user_id", event.UserID),
+	)
 
 	avatarID, err := uuid.Parse(event.AvatarID)
 	if err != nil {
@@ -71,6 +81,9 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) error {
 	}
 
 	if avatar.IsProcessed() {
+		// Событие пришло повторно — в трейсе это должно быть видно, иначе
+		// непонятно, почему спан короткий и без вложенной работы.
+		span.AddEvent("already processed, duplicate skipped")
 		log.InfoContext(ctx, "аватарка уже обработана, повтор пропущен")
 
 		return nil
@@ -81,7 +94,7 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) error {
 		return err
 	}
 
-	img, err := imageproc.Decode(data, p.maxPixels)
+	img, err := p.decode(ctx, data)
 	if err != nil {
 		// Повторы не помогут: файл не станет корректным. Помечаем провал и подтверждаем событие.
 		log.ErrorContext(ctx, "изображение не удалось разобрать", "err", err)
@@ -100,6 +113,12 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) error {
 
 	width, height := imageproc.Dimensions(img)
 
+	span.SetAttributes(
+		attribute.Int("image.width", width),
+		attribute.Int("image.height", height),
+		attribute.Int("image.thumbnails", len(thumbnails)),
+	)
+
 	updated, err := p.repo.UpdateProcessingResult(ctx, avatarID, thumbnails, width, height)
 	if err != nil {
 		return err
@@ -111,12 +130,23 @@ func (p *Processor) HandleUpload(ctx context.Context, body []byte) error {
 	return nil
 }
 
+// decode разбирает изображение в отдельном спане: на большом файле это самая
+// долгая операция обработки, и без своего спана её не отличить от выгрузки.
+func (p *Processor) decode(ctx context.Context, data []byte) (_ image.Image, err error) {
+	_, span := observability.Tracer().Start(ctx, "image.decode")
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(attribute.Int("image.bytes", len(data)))
+
+	return imageproc.Decode(data, p.maxPixels)
+}
+
 func (p *Processor) uploadThumbnails(ctx context.Context, avatar *domain.Avatar, img image.Image) (map[string]string, error) {
 	thumbnails := make(map[string]string, len(thumbnailSizes))
 
 	for name, side := range thumbnailSizes {
 		var buf bytes.Buffer
-		if err := imageproc.EncodeJPEG(&buf, imageproc.Thumbnail(img, side)); err != nil {
+		if err := p.encodeThumbnail(ctx, &buf, img, side); err != nil {
 			return nil, err
 		}
 
@@ -161,4 +191,15 @@ func (p *Processor) HandleDelete(ctx context.Context, body []byte) error {
 		"avatar_id", event.AvatarID, "keys", len(event.S3Keys))
 
 	return nil
+}
+
+// encodeThumbnail строит и кодирует одну миниатюру под своим спаном:
+// в трейсе видно, сколько стоит каждый размер по отдельности.
+func (p *Processor) encodeThumbnail(ctx context.Context, buf *bytes.Buffer, img image.Image, side int) (err error) {
+	_, span := observability.Tracer().Start(ctx, "image.thumbnail")
+	defer func() { observability.EndSpan(span, err) }()
+
+	span.SetAttributes(attribute.Int("image.thumbnail_side", side))
+
+	return imageproc.EncodeJPEG(buf, imageproc.Thumbnail(img, side))
 }

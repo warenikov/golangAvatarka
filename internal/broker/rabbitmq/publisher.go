@@ -10,6 +10,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 )
 
 type Publisher struct {
@@ -38,7 +39,10 @@ func (p *Publisher) PublishDelete(ctx context.Context, event domain.AvatarDelete
 
 // publish отправляет сообщение и дожидается подтверждения брокера.
 // MessageID равен идентификатору аватарки — по нему потребитель узнаёт повтор.
-func (p *Publisher) publish(ctx context.Context, routingKey, messageID string, payload any) error {
+func (p *Publisher) publish(ctx context.Context, routingKey, messageID string, payload any) (err error) {
+	ctx, span := startPublishSpan(ctx, p.conn.topology.exchange, routingKey, messageID)
+	defer func() { observability.EndSpan(span, err) }()
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
@@ -54,7 +58,10 @@ func (p *Publisher) publish(ctx context.Context, routingKey, messageID string, p
 			DeliveryMode: amqp.Persistent,
 			MessageId:    messageID,
 			Timestamp:    time.Now(),
-			Body:         body,
+			// Контекст трассировки едет вместе с сообщением: иначе работа
+			// воркера окажется отдельным трейсом, не связанным с запросом.
+			Headers: injectTrace(ctx, nil),
+			Body:    body,
 		})
 	if err != nil {
 		return fmt.Errorf("publish %s: %w", routingKey, err)
