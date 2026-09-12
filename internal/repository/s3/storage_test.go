@@ -32,7 +32,10 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 
-	container, err := tcminio.Run(ctx, "minio/minio:RELEASE.2024-12-18T13-15-44Z",
+	// quay.io, а не Docker Hub: анонимные загрузки с раннеров GitHub упираются
+	// в лимит Docker Hub, и задача падала с "pull access denied" на образе,
+	// который никуда не девался. Тег тот же.
+	container, err := tcminio.Run(ctx, "quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z",
 		tcminio.WithUsername("minioadmin"),
 		tcminio.WithPassword("minioadmin"),
 	)
