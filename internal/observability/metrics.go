@@ -2,6 +2,8 @@
 package observability
 
 import (
+	"fmt"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
@@ -13,7 +15,11 @@ type HTTP struct {
 }
 
 // NewHTTP создаёт метрики HTTP-слоя и регистрирует их в переданном реестре.
-func NewHTTP(reg prometheus.Registerer) *HTTP {
+//
+// Ошибка возвращается, а не вызывает панику: конструктор зовут из run(),
+// которая умеет её обработать. Must-варианты уместны там, где обработать
+// ошибку негде — переменные уровня пакета и init().
+func NewHTTP(reg prometheus.Registerer) (*HTTP, error) {
 	m := &HTTP{
 		Requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "http_requests_total",
@@ -30,18 +36,39 @@ func NewHTTP(reg prometheus.Registerer) *HTTP {
 		}),
 	}
 
-	reg.MustRegister(m.Requests, m.Duration, m.InFlight)
+	if err := register(reg, m.Requests, m.Duration, m.InFlight); err != nil {
+		return nil, fmt.Errorf("http metrics: %w", err)
+	}
 
-	return m
+	return m, nil
 }
 
 // NewRegistry создаёт реестр с метриками среды выполнения Go и процесса.
-func NewRegistry() *prometheus.Registry {
+func NewRegistry() (*prometheus.Registry, error) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(
+
+	err := register(reg,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("runtime metrics: %w", err)
+	}
 
-	return reg
+	return reg, nil
+}
+
+// register регистрирует набор коллекторов, останавливаясь на первой ошибке.
+//
+// Дубликат метрики — это ошибка сборки приложения: два реестра с одним
+// набором или повторная инициализация. Понятное сообщение здесь полезнее
+// паники со стектрейсом из глубины Prometheus.
+func register(reg prometheus.Registerer, collectors ...prometheus.Collector) error {
+	for _, c := range collectors {
+		if err := reg.Register(c); err != nil {
+			return fmt.Errorf("register collector: %w", err)
+		}
+	}
+
+	return nil
 }

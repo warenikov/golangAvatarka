@@ -137,7 +137,8 @@ func TestBacklogGaugeIsNotCappedByBatchSize(t *testing.T) {
 	publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(nil).Times(len(batch))
 
 	reg := prometheus.NewRegistry()
-	metrics := observability.NewBusiness(reg)
+	metrics, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
 
 	r := NewReconciler(repo, publisher, time.Minute, reconcileAge, discardLogger()).WithMetrics(metrics)
 	r.reconcile(t.Context())

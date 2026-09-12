@@ -40,7 +40,8 @@ func TestAdminServerServesMetricsAndHealth(t *testing.T) {
 	addr := freePort(t)
 
 	reg := prometheus.NewRegistry()
-	business := observability.NewBusiness(reg)
+	business, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
 	business.AvatarDeleted()
 
 	health := func(w http.ResponseWriter, _ *http.Request) {

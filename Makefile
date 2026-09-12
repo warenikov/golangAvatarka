@@ -43,10 +43,13 @@ logs-obs: ## Логи стека наблюдаемости
 	$(COMPOSE) --profile obs logs -f
 
 down: ## Остановить окружение (данные сохраняются)
-	$(COMPOSE) --profile app --profile obs down
+	# --remove-orphans обязателен: контейнеры, созданные до правки compose-файла,
+	# перестают совпадать с текущим описанием, и обычный down молча их пропускает,
+	# выходя с кодом 0 — стек наблюдаемости остаётся висеть в памяти.
+	$(COMPOSE) --profile app --profile obs down --remove-orphans
 
 down-v: ## Остановить окружение и удалить тома с данными
-	$(COMPOSE) --profile app --profile obs down -v
+	$(COMPOSE) --profile app --profile obs down -v --remove-orphans
 
 logs: ## Логи окружения (Ctrl+C для выхода)
 	$(COMPOSE) --profile app logs -f

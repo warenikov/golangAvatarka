@@ -19,6 +19,10 @@ import (
 // corsMaxAge — срок кеширования preflight-ответа в секундах.
 const corsMaxAge = 300
 
+// serverSpanName — запасное имя операции. Используется, только если
+// форматтер почему-то не отработал: у otelhttp это обязательный аргумент.
+const serverSpanName = "http.server"
+
 type RouterDeps struct {
 	Config   *config.Config
 	Log      *slog.Logger
@@ -42,7 +46,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(middleware.RequestID)
 	// Трейсинг стоит выше логов и метрик: тогда trace_id попадает и в запись
 	// лога о запросе, и спан покрывает всю обработку целиком.
-	r.Use(otelhttp.NewMiddleware(deps.Config.App.Version))
+	//
+	// Имя спана до маршрутизации — только метод: шаблон пути в этот момент
+	// ещё неизвестен, а по соглашениям OTel имя серверного спана без маршрута
+	// и есть метод. Дальше TraceRoute доуточняет его до "METHOD /шаблон".
+	r.Use(otelhttp.NewMiddleware(serverSpanName,
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return SpanMethodName(r.Method)
+		}),
+	))
 	r.Use(TraceRoute)
 	r.Use(Recoverer(deps.Log))
 	r.Use(RequestLogger(deps.Log))

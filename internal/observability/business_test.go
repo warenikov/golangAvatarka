@@ -29,7 +29,8 @@ func TestBusinessMetricsAreNilSafe(t *testing.T) {
 
 func TestBusinessMetricsCount(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	b := observability.NewBusiness(reg)
+	b, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
 
 	b.UploadFinished(observability.ResultOK, 200*1024)
 	b.UploadFinished(observability.ResultOK, 400*1024)
@@ -73,7 +74,8 @@ func TestBusinessMetricsCount(t *testing.T) {
 // мерить, а нули испортили бы перцентили.
 func TestFailedUploadIsNotSized(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	b := observability.NewBusiness(reg)
+	b, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
 
 	b.UploadFinished(observability.ResultError, 999)
 
@@ -87,7 +89,8 @@ func TestFailedUploadIsNotSized(t *testing.T) {
 // не обрабатывал, а околонулевые значения занизили бы перцентили.
 func TestSkippedProcessingIsNotTimed(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	b := observability.NewBusiness(reg)
+	b, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
 
 	b.ProcessingFinished(observability.ResultSkipped, time.Now(), 0)
 

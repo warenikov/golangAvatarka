@@ -17,6 +17,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -94,7 +95,8 @@ func TestRecovererPassesSuccessThrough(t *testing.T) {
 
 func TestMetricsCountsRequests(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := observability.NewHTTP(reg)
+	m, err := observability.NewHTTP(reg)
+	require.NoError(t, err)
 
 	r := chi.NewRouter()
 	r.Use(rest.Metrics(m))
@@ -116,7 +118,8 @@ func TestMetricsCountsRequests(t *testing.T) {
 
 func TestMetricsLabelsUnmatchedRoute(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := observability.NewHTTP(reg)
+	m, err := observability.NewHTTP(reg)
+	require.NoError(t, err)
 
 	r := chi.NewRouter()
 	r.Use(rest.Metrics(m))
@@ -355,4 +358,51 @@ func TestTraceRouteKeepsNameWhenRouteUnknown(t *testing.T) {
 	spans := exporter.GetSpans()
 	require.Len(t, spans, 1)
 	assert.Equal(t, "HTTP GET", spans[0].Name)
+}
+
+// Имя операции до маршрутизации — только метод. Раньше туда уходила версия
+// приложения, и все несопоставленные запросы попадали в Jaeger под именем
+// вроде "dev": найти их поиском было невозможно.
+func TestSpanNameForUnmatchedRequestIsMethod(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+
+	tests := []struct {
+		name     string
+		method   string
+		wantSpan string
+	}{
+		{"известный метод", http.MethodGet, "GET"},
+		{"известный метод POST", http.MethodPost, "POST"},
+		// Клиент вправе прислать любую строку, а имя спана — метка
+		// с неограниченной кардинальностью.
+		{"произвольный метод", "WAT", "HTTP"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exporter.Reset()
+
+			r := chi.NewRouter()
+			r.Use(otelhttp.NewMiddleware("http.server",
+				otelhttp.WithSpanNameFormatter(func(_ string, req *http.Request) string {
+					return rest.SpanMethodName(req.Method)
+				}),
+				otelhttp.WithTracerProvider(provider),
+			))
+			r.Use(rest.TraceRoute)
+			r.Get("/health", func(http.ResponseWriter, *http.Request) {})
+			r.NotFound(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(tt.method, "/нет-такого", nil))
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, 1)
+			assert.Equal(t, tt.wantSpan, spans[0].Name)
+		})
+	}
 }

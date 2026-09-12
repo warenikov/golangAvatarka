@@ -14,7 +14,8 @@ import (
 
 func TestNewHTTPRegistersMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := observability.NewHTTP(reg)
+	m, err := observability.NewHTTP(reg)
+	require.NoError(t, err)
 
 	m.Requests.WithLabelValues("GET", "/api/v1/avatars/{avatar_id}", "200").Inc()
 	m.Duration.WithLabelValues("GET", "/api/v1/avatars/{avatar_id}").Observe(0.05)
@@ -37,16 +38,36 @@ func TestNewHTTPRegistersMetrics(t *testing.T) {
 	assert.Contains(t, names, "http_requests_in_flight")
 }
 
-func TestNewHTTPPanicsOnDoubleRegistration(t *testing.T) {
+// Двойная регистрация — ошибка сборки приложения, и сообщить о ней надо
+// понятной ошибкой, а не паникой со стектрейсом из глубины Prometheus:
+// конструктор зовут из run(), которая умеет её обработать.
+func TestNewHTTPReportsDoubleRegistration(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	observability.NewHTTP(reg)
 
-	assert.Panics(t, func() { observability.NewHTTP(reg) },
-		"повторная регистрация метрик — ошибка сборки приложения, а не рантайма")
+	_, err := observability.NewHTTP(reg)
+	require.NoError(t, err)
+
+	second, err := observability.NewHTTP(reg)
+	require.Error(t, err)
+	assert.Nil(t, second)
+	assert.Contains(t, err.Error(), "http metrics")
+}
+
+func TestNewBusinessReportsDoubleRegistration(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	_, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
+
+	second, err := observability.NewBusiness(reg)
+	require.Error(t, err)
+	assert.Nil(t, second)
+	assert.Contains(t, err.Error(), "business metrics")
 }
 
 func TestNewRegistryHasRuntimeCollectors(t *testing.T) {
-	reg := observability.NewRegistry()
+	reg, err := observability.NewRegistry()
+	require.NoError(t, err)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)

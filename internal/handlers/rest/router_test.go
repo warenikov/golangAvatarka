@@ -69,10 +69,13 @@ func newRouter(t *testing.T, opts routerOpts) (http.Handler, apiDeps) {
 	uploadLimiter := rest.UploadRateLimiter(log, cfg.App.RateLimitUpload)
 	registry := prometheus.NewRegistry()
 
+	httpMetrics, err := observability.NewHTTP(registry)
+	require.NoError(t, err)
+
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,
-		Metrics:       observability.NewHTTP(registry),
+		Metrics:       httpMetrics,
 		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(svc, cfg, log),
 		Web:           webui.NewHandler(svc, cfg, log, uploadLimiter),

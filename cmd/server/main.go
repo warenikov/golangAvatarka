@@ -126,8 +126,20 @@ func run() error {
 
 	log.InfoContext(ctx, "брокер подключён", "exchange", cfg.RabbitMQ.Exchange)
 
-	registry := observability.NewRegistry()
-	businessMetrics := observability.NewBusiness(registry)
+	registry, err := observability.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("metrics registry: %w", err)
+	}
+
+	businessMetrics, err := observability.NewBusiness(registry)
+	if err != nil {
+		return fmt.Errorf("business metrics: %w", err)
+	}
+
+	httpMetrics, err := observability.NewHTTP(registry)
+	if err != nil {
+		return fmt.Errorf("http metrics: %w", err)
+	}
 
 	publisher = publisher.WithMetrics(businessMetrics)
 
@@ -142,7 +154,7 @@ func run() error {
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,
-		Metrics:       observability.NewHTTP(registry),
+		Metrics:       httpMetrics,
 		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
 		Web:           webHandler,

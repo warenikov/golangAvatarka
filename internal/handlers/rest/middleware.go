@@ -182,3 +182,20 @@ func TraceRoute(next http.Handler) http.Handler {
 		span.SetAttributes(semconv.HTTPRoute(route))
 	})
 }
+
+// SpanMethodName возвращает имя спана для запроса, которому ещё не сопоставлен
+// маршрут.
+//
+// Метод берётся только из известных: клиент вправе прислать любую строку,
+// а имя спана — метка с неограниченной кардинальностью, и произвольные
+// значения засорили бы список операций в Jaeger.
+func SpanMethodName(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return method
+	default:
+		return "HTTP"
+	}
+}

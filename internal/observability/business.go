@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,7 +38,11 @@ const (
 )
 
 // NewBusiness создаёт бизнес-метрики и регистрирует их в переданном реестре.
-func NewBusiness(reg prometheus.Registerer) *Business {
+//
+// Ошибка возвращается, а не вызывает панику: конструктор зовут из run(),
+// которая умеет её обработать, и двойная инициализация должна выглядеть
+// понятным сообщением, а не стектрейсом из глубины Prometheus.
+func NewBusiness(reg prometheus.Registerer) (*Business, error) {
 	b := &Business{
 		uploads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "avatar_uploads_total",
@@ -81,12 +86,15 @@ func NewBusiness(reg prometheus.Registerer) *Business {
 		}),
 	}
 
-	reg.MustRegister(
+	err := register(reg,
 		b.uploads, b.uploadBytes, b.processingDuration, b.processed,
 		b.thumbnails, b.deleted, b.events, b.deadLettered, b.pendingBacklog,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("business metrics: %w", err)
+	}
 
-	return b
+	return b, nil
 }
 
 // UploadFinished отмечает завершённую загрузку.

@@ -99,8 +99,15 @@ func run() error {
 		}
 	}()
 
-	registry := observability.NewRegistry()
-	metrics := observability.NewBusiness(registry)
+	registry, err := observability.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("metrics registry: %w", err)
+	}
+
+	metrics, err := observability.NewBusiness(registry)
+	if err != nil {
+		return fmt.Errorf("business metrics: %w", err)
+	}
 
 	publisher, err := rabbitmq.NewPublisher(conn)
 	if err != nil {
