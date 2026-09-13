@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"go-avatar-service/internal/config"
 	webui "go-avatar-service/internal/handlers/web"
@@ -17,6 +18,10 @@ import (
 
 // corsMaxAge — срок кеширования preflight-ответа в секундах.
 const corsMaxAge = 300
+
+// serverSpanName — запасное имя операции. Используется, только если
+// форматтер почему-то не отработал: у otelhttp это обязательный аргумент.
+const serverSpanName = "http.server"
 
 type RouterDeps struct {
 	Config   *config.Config
@@ -39,6 +44,18 @@ func NewRouter(deps RouterDeps) http.Handler {
 	app := deps.Config.App
 
 	r.Use(middleware.RequestID)
+	// Трейсинг стоит выше логов и метрик: тогда trace_id попадает и в запись
+	// лога о запросе, и спан покрывает всю обработку целиком.
+	//
+	// Имя спана до маршрутизации — только метод: шаблон пути в этот момент
+	// ещё неизвестен, а по соглашениям OTel имя серверного спана без маршрута
+	// и есть метод. Дальше TraceRoute доуточняет его до "METHOD /шаблон".
+	r.Use(otelhttp.NewMiddleware(serverSpanName,
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return SpanMethodName(r.Method)
+		}),
+	))
+	r.Use(TraceRoute)
 	r.Use(Recoverer(deps.Log))
 	r.Use(RequestLogger(deps.Log))
 	r.Use(Metrics(deps.Metrics))

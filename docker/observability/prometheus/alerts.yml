@@ -1,0 +1,76 @@
+# Правила намеренно немногочисленны: алерт, на который перестают реагировать,
+# хуже отсутствующего. Каждое правило отвечает на вопрос «что сломано
+# для пользователя», а не «какая метрика выглядит непривычно».
+groups:
+  - name: gophprofile-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"server|worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} не отвечает"
+          description: >-
+            Prometheus не может снять метрики с {{ $labels.job }} дольше минуты.
+            Проверить контейнер и его /health.
+
+      - alert: HighErrorRate
+        # clamp_min не даёт делению на ноль срабатывать на пустом трафике.
+        expr: >-
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Более 5% ответов — 5xx"
+          description: "Доля серверных ошибок держится выше 5% пять минут подряд."
+
+  - name: gophprofile-processing
+    rules:
+      # Отставание важнее скорости: пользователь видит оригинал вместо
+      # миниатюры, пока воркер не разгребёт очередь.
+      - alert: ProcessingBacklogGrowing
+        expr: avatar_processing_backlog > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Очередь обработки не разгребается"
+          description: >-
+            {{ $value }} аватарок ждут обработки дольше допустимого.
+            Воркер не справляется, упал или потерял соединение с брокером.
+
+      - alert: EventsDeadLettered
+        expr: increase(avatar_events_dead_lettered_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "События уходят в очередь разбора"
+          description: >-
+            За 15 минут {{ $value }} событий исчерпали попытки обработки.
+            Эти аватарки останутся без миниатюр до ручного вмешательства.
+
+      - alert: UploadFailureRate
+        expr: >-
+          sum(rate(avatar_uploads_total{result="error"}[10m]))
+          / clamp_min(sum(rate(avatar_uploads_total[10m])), 0.001) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Каждая десятая загрузка не проходит"
+          description: "Проверить доступность хранилища и базы."
+
+      - alert: ProcessingTooSlow
+        expr: >-
+          histogram_quantile(0.95,
+            sum(rate(avatar_processing_duration_seconds_bucket[10m])) by (le)) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Обработка миниатюр замедлилась"
+          description: "p95 построения миниатюр держится выше 5 секунд."

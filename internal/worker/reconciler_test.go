@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 )
 
 const reconcileAge = 5 * time.Minute
@@ -37,6 +39,7 @@ func TestReconcileRepublishesStuckAvatars(t *testing.T) {
 	stuck := stuckAvatars(3)
 	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
 		Return(stuck, nil).Once()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).Return(len(stuck), nil).Once()
 
 	var mu sync.Mutex
 	published := make([]domain.AvatarUploadEvent, 0, len(stuck))
@@ -64,6 +67,7 @@ func TestReconcileWithNothingStuck(t *testing.T) {
 
 	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
 		Return(nil, nil).Once()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).Return(0, nil).Once()
 
 	r := NewReconciler(repo, NewMockEventPublisher(t), time.Minute, reconcileAge, discardLogger())
 	r.reconcile(t.Context())
@@ -88,6 +92,7 @@ func TestReconcileContinuesAfterPublishError(t *testing.T) {
 	stuck := stuckAvatars(2)
 	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
 		Return(stuck, nil).Once()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).Return(len(stuck), nil).Once()
 	publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(assert.AnError).Twice()
 
 	r := NewReconciler(repo, publisher, time.Minute, reconcileAge, discardLogger())
@@ -98,6 +103,7 @@ func TestReconcilerRunStopsOnContextCancel(t *testing.T) {
 	repo := NewMockRepository(t)
 	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
 		Return(nil, nil).Maybe()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).Return(0, nil).Maybe()
 
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -114,4 +120,61 @@ func TestReconcilerRunStopsOnContextCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("реконсилятор не остановился по отмене контекста")
 	}
+}
+
+// Гейдж отставания не должен упираться в размер пачки: и десять застрявших
+// аватарок, и десять тысяч выглядели бы одинаково, а по аннотации алерта
+// оператор увидел бы неверное число.
+func TestBacklogGaugeIsNotCappedByBatchSize(t *testing.T) {
+	repo := NewMockRepository(t)
+	publisher := NewMockEventPublisher(t)
+
+	// Переиздать за раз можно только пачку, а застряло кратно больше.
+	batch := stuckAvatars(reconcileBatch)
+	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
+		Return(batch, nil).Once()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).Return(5000, nil).Once()
+	publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(nil).Times(len(batch))
+
+	reg := prometheus.NewRegistry()
+	metrics, err := observability.NewBusiness(reg)
+	require.NoError(t, err)
+
+	r := NewReconciler(repo, publisher, time.Minute, reconcileAge, discardLogger()).WithMetrics(metrics)
+	r.reconcile(t.Context())
+
+	assert.InDelta(t, 5000.0, backlogValue(t, reg), 0.001,
+		"в метрике должно быть реальное отставание, а не размер выборки")
+}
+
+// Сбой подсчёта не должен ронять переиздание: событие важнее метрики.
+func TestBacklogCountFailureDoesNotStopRepublish(t *testing.T) {
+	repo := NewMockRepository(t)
+	publisher := NewMockEventPublisher(t)
+
+	stuck := stuckAvatars(2)
+	repo.EXPECT().ListPendingOlderThan(mock.Anything, reconcileAge, reconcileBatch).
+		Return(stuck, nil).Once()
+	repo.EXPECT().CountPendingOlderThan(mock.Anything, reconcileAge).
+		Return(0, assert.AnError).Once()
+	publisher.EXPECT().PublishUpload(mock.Anything, mock.Anything).Return(nil).Twice()
+
+	r := NewReconciler(repo, publisher, time.Minute, reconcileAge, discardLogger())
+
+	assert.NotPanics(t, func() { r.reconcile(t.Context()) })
+}
+
+func backlogValue(t *testing.T, reg *prometheus.Registry) float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	for _, f := range families {
+		if f.GetName() == "avatar_processing_backlog" {
+			return f.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+
+	return -1
 }

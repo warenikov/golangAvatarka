@@ -10,7 +10,7 @@ MIGRATIONS  := ./migrations
 DB_DSN      ?= postgres://avatars:avatars@localhost:5432/avatars?sslmode=disable
 
 .DEFAULT_GOAL := help
-.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks sec test test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
+.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks sec test up-obs logs-obs test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
 
 help: ## Показать список команд
 	grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -36,11 +36,20 @@ up: ## Поднять инфраструктуру: postgres, minio, rabbitmq
 up-all: ## Поднять всё, включая server и worker в контейнерах
 	$(COMPOSE) --profile app up -d --build
 
+up-obs: ## Поднять всё вместе с наблюдаемостью: Jaeger, Prometheus, Grafana, алерты
+	TRACING_ENABLED=true $(COMPOSE) --profile app --profile obs up -d --build
+
+logs-obs: ## Логи стека наблюдаемости
+	$(COMPOSE) --profile obs logs -f
+
 down: ## Остановить окружение (данные сохраняются)
-	$(COMPOSE) --profile app down
+	# --remove-orphans обязателен: контейнеры, созданные до правки compose-файла,
+	# перестают совпадать с текущим описанием, и обычный down молча их пропускает,
+	# выходя с кодом 0 — стек наблюдаемости остаётся висеть в памяти.
+	$(COMPOSE) --profile app --profile obs down --remove-orphans
 
 down-v: ## Остановить окружение и удалить тома с данными
-	$(COMPOSE) --profile app down -v
+	$(COMPOSE) --profile app --profile obs down -v --remove-orphans
 
 logs: ## Логи окружения (Ctrl+C для выхода)
 	$(COMPOSE) --profile app logs -f

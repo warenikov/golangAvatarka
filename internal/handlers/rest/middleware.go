@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-avatar-service/internal/observability"
 )
@@ -154,4 +156,46 @@ func rateLimiter(log *slog.Logger, requestsPerMinute int, keyFn httprate.KeyFunc
 // дорогая операция, и общий счётчик не даёт обойти лимит сменой точки входа.
 func UploadRateLimiter(log *slog.Logger, requestsPerMinute int) func(http.Handler) http.Handler {
 	return rateLimiter(log, requestsPerMinute, clientIPKey)
+}
+
+// TraceRoute переименовывает спан HTTP-запроса в "METHOD /шаблон/пути".
+//
+// otelhttp называет спан до маршрутизации, когда шаблон ещё неизвестен,
+// поэтому все запросы попадали бы в Jaeger под одним именем. Шаблон, а не сам
+// путь: иначе на каждую аватарку заводится отдельная операция и поиск по
+// трейсам превращается в перебор.
+func TraceRoute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+
+		route := chi.RouteContext(r.Context()).RoutePattern()
+		if route == "" {
+			return
+		}
+
+		span := trace.SpanFromContext(r.Context())
+		if !span.IsRecording() {
+			return
+		}
+
+		span.SetName(r.Method + " " + route)
+		span.SetAttributes(semconv.HTTPRoute(route))
+	})
+}
+
+// SpanMethodName возвращает имя спана для запроса, которому ещё не сопоставлен
+// маршрут.
+//
+// Метод берётся только из известных: клиент вправе прислать любую строку,
+// а имя спана — метка с неограниченной кардинальностью, и произвольные
+// значения засорили бы список операций в Jaeger.
+func SpanMethodName(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return method
+	default:
+		return "HTTP"
+	}
 }

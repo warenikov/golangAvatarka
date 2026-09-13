@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -23,6 +24,14 @@ func NewPool(ctx context.Context, cfg config.DB) (*pgxpool.Pool, error) {
 
 	poolCfg.MaxConns = cfg.MaxConns
 	poolCfg.MinConns = cfg.MinConns
+
+	// Спаны на каждый запрос к базе. WithTrimSQLInSpanName оставляет в имени
+	// спана только начало запроса: полный текст уходит в атрибут, иначе в
+	// Jaeger имя операции растягивается на несколько строк и список
+	// операций становится нечитаемым.
+	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer(
+		otelpgx.WithTrimSQLInSpanName(),
+	)
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {

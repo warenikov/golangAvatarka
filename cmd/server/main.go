@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,7 +31,12 @@ const (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "сервер остановлен с ошибкой: %v\n", err)
+		// Логгером, а не в stderr: сборщик логов индексирует только JSON-строки
+		// с полем service, и обычный Fprintf не попал бы в OpenSearch —
+		// то есть причина падения терялась бы ровно тогда, когда нужна.
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+			With("service", "server").
+			Error("процесс остановлен с ошибкой", "err", err)
 		os.Exit(1)
 	}
 }
@@ -49,6 +55,32 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := observability.SetupTracing(ctx, observability.TracingConfig{
+		Enabled:     cfg.Tracing.Enabled,
+		Endpoint:    cfg.Tracing.Endpoint,
+		ServiceName: "gophprofile-server",
+		Version:     cfg.App.Version,
+		Environment: cfg.App.Env,
+		SampleRatio: cfg.Tracing.SampleRatio,
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+
+	// Контекст отдельный: основной к моменту остановки уже отменён сигналом,
+	// а накопленные спаны нужно успеть дослать.
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.App.ShutdownTimeout)
+		defer cancel()
+
+		if flushErr := shutdownTracing(flushCtx); flushErr != nil {
+			log.Error("трейсы не досланы", "err", flushErr)
+		}
+	}()
+
+	log.InfoContext(ctx, "трейсинг настроен",
+		"enabled", cfg.Tracing.Enabled, "endpoint", cfg.Tracing.Endpoint)
 
 	pool, err := postgres.NewPool(ctx, cfg.DB)
 	if err != nil {
@@ -94,18 +126,35 @@ func run() error {
 
 	log.InfoContext(ctx, "брокер подключён", "exchange", cfg.RabbitMQ.Exchange)
 
+	registry, err := observability.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("metrics registry: %w", err)
+	}
+
+	businessMetrics, err := observability.NewBusiness(registry)
+	if err != nil {
+		return fmt.Errorf("business metrics: %w", err)
+	}
+
+	httpMetrics, err := observability.NewHTTP(registry)
+	if err != nil {
+		return fmt.Errorf("http metrics: %w", err)
+	}
+
+	publisher = publisher.WithMetrics(businessMetrics)
+
 	repo := postgres.NewAvatarRepository(pool)
-	avatarSvc := services.NewAvatarService(repo, storage, publisher, log)
+	avatarSvc := services.NewAvatarService(repo, storage, publisher, log,
+		services.WithMetrics(businessMetrics))
 
 	// Один ограничитель на обе точки входа загрузки — REST и веб-форму.
 	uploadLimiter := rest.UploadRateLimiter(log.With("component", "ratelimit"), cfg.App.RateLimitUpload)
 	webHandler := webui.NewHandler(avatarSvc, cfg, log.With("component", "web"), uploadLimiter)
 
-	registry := observability.NewRegistry()
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,
-		Metrics:       observability.NewHTTP(registry),
+		Metrics:       httpMetrics,
 		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
 		Web:           webHandler,

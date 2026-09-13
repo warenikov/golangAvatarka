@@ -159,7 +159,7 @@ func TestHandleDeliveryAcksOnSuccess(t *testing.T) {
 	c := newTestConsumer(ch, 3)
 
 	var gotBody []byte
-	c.handleDelivery(t.Context(), testLogger(), deliveryWithDeaths(ack, 0, "тело"),
+	c.handleDelivery(t.Context(), testLogger(), "avatars.process", deliveryWithDeaths(ack, 0, "тело"),
 		func(_ context.Context, body []byte) error {
 			gotBody = body
 
@@ -189,7 +189,7 @@ func TestHandleDeliveryNacksForRetry(t *testing.T) {
 			ch := &fakeChannel{}
 			c := newTestConsumer(ch, 3)
 
-			c.handleDelivery(t.Context(), testLogger(), deliveryWithDeaths(ack, tt.rejected, "{}"),
+			c.handleDelivery(t.Context(), testLogger(), "avatars.process", deliveryWithDeaths(ack, tt.rejected, "{}"),
 				func(context.Context, []byte) error { return errors.New("временный сбой") })
 
 			acks, nacks := ack.counts()
@@ -212,7 +212,7 @@ func TestHandleDeliverySendsToDeadLetterWhenRetriesExhausted(t *testing.T) {
 
 	delivery := deliveryWithDeaths(ack, 3, `{"avatar_id":"a-1"}`)
 
-	c.handleDelivery(t.Context(), testLogger(), delivery,
+	c.handleDelivery(t.Context(), testLogger(), "avatars.process", delivery,
 		func(context.Context, []byte) error { return errors.New("битая картинка") })
 
 	acks, nacks := ack.counts()
@@ -251,7 +251,7 @@ func TestHandleDeliveryDeadLetterBoundary(t *testing.T) {
 			ch := &fakeChannel{}
 			c := newTestConsumer(ch, tt.maxRetries)
 
-			c.handleDelivery(t.Context(), testLogger(), deliveryWithDeaths(ack, tt.rejected, "{}"),
+			c.handleDelivery(t.Context(), testLogger(), "avatars.process", deliveryWithDeaths(ack, tt.rejected, "{}"),
 				func(context.Context, []byte) error { return errors.New("сбой") })
 
 			acks, nacks := ack.counts()
@@ -276,7 +276,7 @@ func TestHandleDeliveryNacksWhenDeadLetterPublishFails(t *testing.T) {
 	ch := &fakeChannel{publishErr: errors.New("брокер недоступен")}
 	c := newTestConsumer(ch, 1)
 
-	c.handleDelivery(t.Context(), testLogger(), deliveryWithDeaths(ack, 5, "{}"),
+	c.handleDelivery(t.Context(), testLogger(), "avatars.process", deliveryWithDeaths(ack, 5, "{}"),
 		func(context.Context, []byte) error { return errors.New("сбой") })
 
 	acks, nacks := ack.counts()
@@ -314,7 +314,7 @@ func TestHandleDeliverySurvivesAckFailure(t *testing.T) {
 			c := newTestConsumer(&fakeChannel{}, 3)
 
 			assert.NotPanics(t, func() {
-				c.handleDelivery(t.Context(), testLogger(), deliveryWithDeaths(ack, tt.rejected, "{}"), tt.handler)
+				c.handleDelivery(t.Context(), testLogger(), "avatars.process", deliveryWithDeaths(ack, tt.rejected, "{}"), tt.handler)
 			})
 		})
 	}
