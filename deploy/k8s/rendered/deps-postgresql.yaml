@@ -65,6 +65,9 @@ spec:
         app.kubernetes.io/instance: gp
         app.kubernetes.io/component: postgresql
     spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
       securityContext:
         # Пользователь postgres в официальном образе. fsGroup нужен, чтобы том
         # оказался доступен на запись процессу без прав root: без него initdb

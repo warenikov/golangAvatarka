@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -64,11 +65,13 @@ func NewServer(addr string, reg *prometheus.Registry, routes AdminRoutes, log *s
 	}
 }
 
-// Run держит сервер до отмены контекста.
+// Run держит сервер до отмены контекста и возвращает ошибку прослушивания.
 //
-// Отказ служебного сервера не должен ронять процесс: без метрик воркер
-// работает хуже наблюдаемым, но продолжает обрабатывать очередь.
-func (s *Server) Run(ctx context.Context) {
+// Как поступить с отказом, решает вызывающий, и решение у процессов разное.
+// Воркер без метрик продолжает разбирать очередь — он просто хуже наблюдаем.
+// Сервер без служебного порта теряет пробы: оркестратор не может выяснить,
+// жив ли он, и убивает под по стартовой проверке, хотя API работает.
+func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 
@@ -83,8 +86,10 @@ func (s *Server) Run(ctx context.Context) {
 	s.log.InfoContext(ctx, "служебный сервер запущен", "addr", s.srv.Addr)
 
 	if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		s.log.ErrorContext(ctx, "служебный сервер недоступен", "err", err)
+		return fmt.Errorf("служебный сервер недоступен: %w", err)
 	}
+
+	return nil
 }
 
 // Addr возвращает адрес прослушивания — пригодно для логов и тестов.

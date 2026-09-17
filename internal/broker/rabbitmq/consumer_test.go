@@ -370,9 +370,13 @@ func TestConsumeProcessesMessagesUntilContextCancelled(t *testing.T) {
 	assert.Len(t, ch.cancelled, 1, "подписка должна быть снята при остановке")
 }
 
-// Брокер может закрыть канал доставки сам — потребитель обязан выйти без ошибки,
-// чтобы воркер переподключился штатно.
-func TestConsumeStopsWhenBrokerClosesChannel(t *testing.T) {
+// Канал доставки, закрытый брокером на ходу, — это отказ, а не штатный выход.
+//
+// Переподключения у потребителя нет, поэтому молчаливый возврат оставлял бы
+// процесс живым и без подписки: очередь копится, метрики в порядке, снаружи
+// всё выглядит работающим. Ошибка уводит errgroup, процесс завершается,
+// и оркестратор поднимает новый — с новым соединением.
+func TestConsumeFailsWhenBrokerClosesChannel(t *testing.T) {
 	deliveries := make(chan amqp.Delivery)
 	c := newTestConsumer(&fakeChannel{deliveries: deliveries}, 3)
 
@@ -385,9 +389,34 @@ func TestConsumeStopsWhenBrokerClosesChannel(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrDeliveryClosed)
+		assert.Contains(t, err.Error(), "avatars.process", "по ошибке должно быть видно, какая очередь осталась без потребителя")
 	case <-time.After(time.Second):
 		t.Fatal("потребитель не заметил закрытия канала доставки")
+	}
+}
+
+// А при остановке тот же самый закрытый канал — норма: отказом это считать
+// нельзя, иначе каждый штатный перевыкат завершался бы ошибкой.
+func TestConsumeIgnoresClosedChannelDuringShutdown(t *testing.T) {
+	deliveries := make(chan amqp.Delivery)
+	c := newTestConsumer(&fakeChannel{deliveries: deliveries}, 3)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Consume(ctx, "avatars.process", func(context.Context, []byte) error { return nil })
+	}()
+
+	cancel()
+	close(deliveries)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("потребитель не остановился")
 	}
 }
 

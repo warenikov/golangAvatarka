@@ -19,9 +19,11 @@ image:
 app:
   env: prod
   logLevel: info
+  # Больше окна обнаружения неготовности (6 с при настройках проб
+  # по умолчанию) плюс запас на разнос endpoints по узлам большого кластера.
   # Сумма drainDelay и shutdownTimeout должна умещаться
-  # в terminationGracePeriodSeconds с запасом.
-  drainDelay: 10s
+  # в terminationGracePeriodSeconds с запасом: 15 + 20 против 60.
+  drainDelay: 15s
   shutdownTimeout: 20s
   corsOrigins: "https://avatars.example.com"
   rateLimitRPM: 600

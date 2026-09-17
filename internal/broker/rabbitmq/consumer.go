@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -84,6 +85,10 @@ func (c *Consumer) Close() error {
 	return nil
 }
 
+// ErrDeliveryClosed возвращается, когда брокер закрыл канал доставки,
+// а остановки никто не запрашивал.
+var ErrDeliveryClosed = errors.New("канал доставки закрыт брокером")
+
 // Consume читает очередь до отмены контекста, дожидаясь завершения начатых обработок.
 func (c *Consumer) Consume(ctx context.Context, queue string, handle Handler) error {
 	tag := fmt.Sprintf("%s-%d", queue, time.Now().UnixNano())
@@ -109,9 +114,24 @@ func (c *Consumer) Consume(ctx context.Context, queue string, handle Handler) er
 
 		case delivery, ok := <-deliveries:
 			if !ok {
-				log.Warn("канал доставки закрыт брокером")
+				// При остановке канал закрывается штатно, и гонка между этой
+				// веткой и ctx.Done() решается в пользу штатного пути.
+				select {
+				case <-ctx.Done():
+					log.Info("потребитель остановлен")
 
-				return nil
+					return nil
+				default:
+				}
+
+				// А вот закрытие на ходу — отказ, и молчать о нём нельзя.
+				// Подписки больше нет, процесс жив, очередь копится, и снаружи
+				// это выглядит как работающий воркер. Ошибка уводит весь
+				// errgroup, процесс завершается, и оркестратор поднимает новый
+				// с новым соединением. Восстанавливаться на месте было бы
+				// сложнее и без выигрыша: подключение к брокеру занимает
+				// доли секунды, а перезапуск заодно чинит и прочее состояние.
+				return fmt.Errorf("%w: очередь %s", ErrDeliveryClosed, queue)
 			}
 
 			c.handleDelivery(ctx, log, queue, delivery, handle)

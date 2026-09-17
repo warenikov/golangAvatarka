@@ -59,6 +59,9 @@ spec:
         app.kubernetes.io/instance: gp
         app.kubernetes.io/component: minio
     spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

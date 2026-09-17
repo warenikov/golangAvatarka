@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -142,8 +143,31 @@ func ClientIP(trustedProxyCIDRs []string) func(http.Handler) http.Handler {
 //
 // Источник адреса задаёт ClientIP. CanonicalizeIP сводит IPv6 к /64 — иначе
 // клиент ротирует адреса внутри своей подсети и обходит лимит.
+//
+// Запасной вариант — адрес соединения. ClientIPFromXFF читает только заголовок
+// и при его отсутствии не ставит адрес вовсе: запрос мимо обратного прокси —
+// проброс порта, прямое обращение к поду, второй балансировщик без
+// X-Forwarded-For — дал бы пустой ключ. Пустой ключ — это одно общее ведро
+// на все такие запросы, то есть один клиент закрывает загрузку всем остальным.
+// Адрес соединения подделать нельзя, поэтому запасной путь ничего не ослабляет.
 func clientIPKey(r *http.Request) (string, error) {
-	return httprate.CanonicalizeIP(middleware.GetClientIP(r.Context())), nil
+	ip := middleware.GetClientIP(r.Context())
+	if ip == "" {
+		ip = remoteHost(r)
+	}
+
+	return httprate.CanonicalizeIP(ip), nil
+}
+
+// remoteHost возвращает адрес, с которого открыто соединение, без порта.
+func remoteHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// RemoteAddr может быть и голым адресом — так его заполняет httptest.
+		return r.RemoteAddr
+	}
+
+	return host
 }
 
 // userKey возвращает ключ лимита по идентификатору пользователя.

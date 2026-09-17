@@ -24,7 +24,7 @@ data:
   APP_ADMIN_ADDR: ":8081"
   APP_REQUEST_TIMEOUT: "60s"
   APP_SHUTDOWN_TIMEOUT: "10s"
-  APP_DRAIN_DELAY: "2s"
+  APP_DRAIN_DELAY: "8s"
   # Схему накатывает Job-хук до выката подов. Реплика, меняющая схему
   # при старте, — гонка тем вероятнее, чем больше реплик.
   APP_AUTO_MIGRATE: "false"

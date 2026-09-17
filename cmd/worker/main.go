@@ -152,7 +152,12 @@ func run() error {
 	admin := observability.NewServer(cfg.Worker.AdminAddr, registry,
 		observability.AdminRoutes{Live: health.Live, Ready: health.Ready}, log)
 	group.Go(func() error {
-		admin.Run(groupCtx)
+		// Отказ намеренно не уводит группу: воркер без метрик продолжает
+		// разбирать очередь, и ронять его из-за служебного порта было бы
+		// хуже, чем остаться без графиков.
+		if adminErr := admin.Run(groupCtx); adminErr != nil {
+			log.ErrorContext(groupCtx, "служебный сервер воркера остановлен", "err", adminErr)
+		}
 
 		return nil
 	})

@@ -182,7 +182,18 @@ func run() error {
 	admin := observability.NewServer(cfg.App.AdminAddr, registry,
 		observability.AdminRoutes{Live: health.Live, Ready: health.Ready},
 		log.With("component", "admin"))
-	go admin.Run(adminCtx)
+
+	// Отказ служебного слушателя для сервера фатален, в отличие от воркера.
+	// На этом порту живут все три пробы: не заняв его, процесс продолжил бы
+	// обслуживать API, но выглядел бы для оркестратора не запустившимся —
+	// и был бы убит стартовой проверкой с причиной, спрятанной в одной
+	// строке лога. Лучше упасть сразу и с понятной ошибкой.
+	adminErr := make(chan error, 1)
+	go func() {
+		if runErr := admin.Run(adminCtx); runErr != nil {
+			adminErr <- runErr
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.App.HTTPAddr,
@@ -204,6 +215,8 @@ func run() error {
 	select {
 	case listenErr := <-serverErr:
 		return fmt.Errorf("listen: %w", listenErr)
+	case listenErr := <-adminErr:
+		return fmt.Errorf("admin listen: %w", listenErr)
 	case <-ctx.Done():
 		stop()
 		log.Info("получен сигнал, останавливаем сервер", "timeout", cfg.App.ShutdownTimeout.String())

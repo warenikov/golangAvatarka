@@ -405,15 +405,47 @@ func TestMetricsAreNotOnPublicPort(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// Под наплывом трафика лимитер отвечал бы на пробы 429, и оркестратор прочитал
-// бы это как отказ сервиса — перезапуск ровно в тот момент, когда сервис жив
-// и просто занят.
-func TestServiceRoutesBypassRateLimit(t *testing.T) {
+// Живость не трогает зависимостей и стоит одного сравнения в памяти, поэтому
+// лимит на ней бесполезен: под наплывом трафика лимитер отвечал бы 429,
+// и внешний наблюдатель прочитал бы это как отказ живого сервиса.
+func TestLivenessBypassesRateLimit(t *testing.T) {
 	const limit = 1
 
 	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
 
-	// Лимит выбирается обычным запросом.
+	exhaustLimit(t, router)
+
+	for range limit + 3 {
+		probe := httptest.NewRecorder()
+		router.ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/livez", nil))
+		assert.Equal(t, http.StatusOK, probe.Code)
+	}
+}
+
+// Готовность, наоборот, опрашивает базу, хранилище и брокер — три обращения
+// к инфраструктуре на запрос. Ingress маршрутизирует весь префикс, так что
+// без лимита этот путь стал бы самым дешёвым способом нагрузить зависимости
+// снаружи. Пробы оркестратора сюда не ходят: у них служебный порт.
+func TestReadinessIsRateLimitedOnPublicPort(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
+
+	exhaustLimit(t, router)
+
+	for _, path := range []string{"/health", "/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+		})
+	}
+}
+
+// exhaustLimit выбирает лимит частоты обычными запросами.
+func exhaustLimit(t *testing.T, router http.Handler) {
+	t.Helper()
+
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusFound, rec.Code)
@@ -421,16 +453,6 @@ func TestServiceRoutesBypassRateLimit(t *testing.T) {
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
-
-	for _, path := range []string{"/health", "/livez", "/readyz"} {
-		t.Run(path, func(t *testing.T) {
-			for range limit + 3 {
-				probe := httptest.NewRecorder()
-				router.ServeHTTP(probe, httptest.NewRequest(http.MethodGet, path, nil))
-				assert.Equal(t, http.StatusOK, probe.Code)
-			}
-		})
-	}
 }
 
 // За обратным прокси адрес соединения принадлежит самому прокси, один на всех.
@@ -491,4 +513,38 @@ func TestDocsPageIsServed(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "/static/swagger/swagger-ui-bundle.js")
 	assert.NotContains(t, rec.Body.String(), "https://unpkg.com")
 	assert.NotContains(t, rec.Body.String(), "cdn.jsdelivr.net")
+}
+
+// Запрос мимо обратного прокси — проброс порта, прямое обращение к поду,
+// второй балансировщик без заголовка. ClientIPFromXFF читает только
+// X-Forwarded-For и при его отсутствии не ставит адрес вовсе: без запасного
+// пути ключ лимита оказался бы пустым, то есть общим на все такие запросы,
+// и один клиент закрывал бы загрузку всем остальным.
+func TestRateLimitFallsBackToRemoteAddrWithoutForwardedHeader(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{
+		rateLimitRPM:   limit,
+		trustedProxies: []string{"192.0.2.0/24"},
+	})
+
+	request := func(remoteAddr string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remoteAddr
+
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.1:5000"))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.1:5000"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "тот же адрес — то же ведро")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.2:5000"))
+	assert.Equal(t, http.StatusFound, rec.Code,
+		"другой адрес — своё ведро, а не общее на всех без заголовка")
 }

@@ -35,7 +35,7 @@ spec:
         # подов: ConfigMap и Secret подключены переменными окружения, а они
         # читаются один раз при старте процесса. Изменение суммы меняет
         # шаблон пода и запускает обычный перевыкат.
-        checksum/config: 791e9de3acd36ceb5ccd7696d9e2a53c3d57b2a68b291fdd30efc2c5f2934741
+        checksum/config: a7e8153791f9a9b356f27ffddc90da643564c486275fb2080d55dadb94a83814
         checksum/secret: be412f70df45471ec28927db94a44f16e6190ec37e050d42aba89c628410dfc9
     spec:
       serviceAccountName: gp-gophprofile
@@ -130,9 +130,9 @@ spec:
             httpGet:
               path: /readyz
               port: metrics
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 2
           resources:
             limits:
               memory: 384Mi

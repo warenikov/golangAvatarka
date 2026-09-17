@@ -38,6 +38,9 @@ spec:
       labels:
         {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "minio") | nindent 8 }}
     spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

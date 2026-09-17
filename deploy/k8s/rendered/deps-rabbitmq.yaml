@@ -60,13 +60,65 @@ spec:
         app.kubernetes.io/instance: gp
         app.kubernetes.io/component: rabbitmq
     spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
         runAsGroup: 999
         fsGroup: 999
+        # Без этого брокер не переживает ни одного перезапуска.
+        #
+        # fsGroup заставляет kubelet при каждом монтировании тома рекурсивно
+        # выставлять групповые права на его содержимое. Erlang хранит в томе
+        # файл .erlang.cookie и требует, чтобы он был доступен только владельцу:
+        # на втором старте права уже расширены, и процесс падает с
+        # "Cookie file must be accessible by owner only". Первый запуск проходит
+        # нормально, потому что файла ещё нет — отказ появляется ровно тогда,
+        # когда под впервые перезапускают.
+        #
+        # OnRootMismatch сверяет владельца и права корня тома и пропускает обход,
+        # если они уже совпадают. Права, выставленные при первом монтировании,
+        # сохраняются.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      # Страховка к OnRootMismatch. Та политика пропускает обход только пока
+      # корень тома выглядит ожидаемо; правка fsGroup, восстановление тома
+      # из копии или пересоздание каталога провижионером снова запускают полный
+      # проход — и cookie расширяется снова. Инициализирующий контейнер
+      # отрабатывает после kubelet и до брокера, поэтому его chmod побеждает
+      # при любой политике.
+      initContainers:
+        - name: fix-cookie-mode
+          image: rabbitmq:4-management-alpine
+          command:
+            - sh
+            - -c
+            - |
+              if [ -f /var/lib/rabbitmq/.erlang.cookie ]; then
+                chmod 0400 /var/lib/rabbitmq/.erlang.cookie
+                echo "права на cookie приведены к 0400"
+              else
+                echo "cookie ещё нет, первый запуск"
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
       containers:
         - name: rabbitmq
           image: rabbitmq:4-management-alpine

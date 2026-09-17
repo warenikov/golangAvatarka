@@ -150,7 +150,21 @@
           "type": "string",
           "minLength": 1
         },
-        "extraEgress": { "type": "array" }
+        "extraEgress": { "type": "array" },
+        "extraIngress": { "type": "array" }
+      }
+    },
+
+    "rabbitmq": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "url": { "type": "string" },
+        "exchange": { "type": "string", "minLength": 1 },
+        "retryTTL": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+        "maxRetries": { "type": "integer", "minimum": 1 },
+        "prefetch": { "type": "integer", "minimum": 1 }
       }
     },
 
