@@ -137,6 +137,16 @@ networkPolicy:
       ports:
         - protocol: TCP
           port: 443
+    # Приёмник трейсов живёт в другом неймспейсе, а значит под default-deny
+    # он недостижим. Без этого правила экспортёр молча ретраит в пустоту,
+    # и трейсов в Jaeger не появляется вовсе — при включённом tracing.enabled.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 4317
 
 tracing:
   enabled: true
