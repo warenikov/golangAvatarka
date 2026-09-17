@@ -463,3 +463,32 @@ func TestRateLimitUsesForwardedHeaderBehindTrustedProxy(t *testing.T) {
 	router.ServeHTTP(rec, request("203.0.113.6"))
 	assert.Equal(t, http.StatusFound, rec.Code, "другой клиент за тем же прокси — своё ведро")
 }
+
+// Спецификация — часть контракта, и её адрес должен быть таким же стабильным,
+// как адреса самих методов: по нему ходят генераторы клиентов.
+func TestOpenAPISpecIsServed(t *testing.T) {
+	router, _ := newRouter(t, routerOpts{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/yaml")
+	assert.Contains(t, rec.Body.String(), "openapi: 3.1.0")
+	assert.Contains(t, rec.Body.String(), "/api/v1/avatars")
+}
+
+func TestDocsPageIsServed(t *testing.T) {
+	router, _ := newRouter(t, routerOpts{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "text/html")
+	// Файлы Swagger UI обязаны быть локальными: страница должна открываться
+	// в контуре без выхода наружу.
+	assert.Contains(t, rec.Body.String(), "/static/swagger/swagger-ui-bundle.js")
+	assert.NotContains(t, rec.Body.String(), "https://unpkg.com")
+	assert.NotContains(t, rec.Body.String(), "cdn.jsdelivr.net")
+}

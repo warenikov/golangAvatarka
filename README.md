@@ -62,7 +62,9 @@ make up-obs     # приложение вместе со стеком наблю
 - мягкое удаление: метаданные помечаются сразу, файлы убирает воркер;
 - веб-интерфейс без JavaScript — загрузка и галерея обычными формами;
 - ограничение частоты запросов, CORS по белому списку, заголовки против сниффинга;
-- сквозная трассировка, метрики Prometheus и структурные логи с корреляцией.
+- сквозная трассировка, метрики Prometheus и структурные логи с корреляцией;
+- Helm-чарт с автомасштабированием, сетевыми политиками и хуком миграций;
+- спецификация OpenAPI 3.1 и Swagger UI, вшитые в бинарь.
 
 ## Быстрый старт
 
@@ -122,6 +124,7 @@ curl -X DELETE -H "X-User-ID: user-1" http://127.0.0.1:8080/api/v1/avatars/<id>
 | http://127.0.0.1:8080/web/upload | форма загрузки, работает без JavaScript |
 | http://127.0.0.1:8080/web/gallery | галерея пользователя с миниатюрами |
 | http://127.0.0.1:8080/static/ | одностраничный фронтенд из шаблона курса, не изменён |
+| http://127.0.0.1:8080/docs | Swagger UI с описанием API |
 | http://127.0.0.1:9001 | консоль MinIO |
 | http://127.0.0.1:15672 | панель RabbitMQ |
 
@@ -136,8 +139,19 @@ curl -X DELETE -H "X-User-ID: user-1" http://127.0.0.1:8080/api/v1/avatars/<id>
 | `GET` | `/api/v1/users/{user_id}/avatar` | последняя аватарка или заглушка |
 | `GET` | `/api/v1/users/{user_id}/avatars` | все аватарки пользователя |
 | `DELETE` | `/api/v1/users/{user_id}/avatar` | удалить последнюю |
-| `GET` | `/health` | состояние зависимостей |
-| `GET` | `/metrics` | метрики Prometheus |
+| `GET` | `/health` | состояние зависимостей (синоним `/readyz`) |
+| `GET` | `/livez` | жив ли процесс |
+| `GET` | `/readyz` | готов ли принимать трафик |
+| `GET` | `/openapi.yaml` | спецификация OpenAPI 3.1 |
+| `GET` | `/docs` | Swagger UI поверх этой спецификации |
+
+Полное описание контракта — в [api/openapi.yaml](api/openapi.yaml). Спецификация
+вшита в бинарь и отдаётся самим сервисом, а Swagger UI лежит в образе: страница
+обязана открываться в закрытом контуре и не зависеть от чужого домена.
+
+`/metrics` на публичном порту нет намеренно. Метрики отдаются на служебном
+порту 8081 вместе с `/livez` и `/readyz`: в метках лежит внутреннее устройство
+сервиса, и через Ingress ему наружу не место.
 
 Загрузка принимает файл в поле `file` или `image` — второе имя использует
 фронтенд из шаблона курса. Пользователь передаётся заголовком `X-User-ID`.
@@ -165,7 +179,107 @@ curl -X DELETE -H "X-User-ID: user-1" http://127.0.0.1:8080/api/v1/avatars/<id>
 > Это осознанное ограничение объёма, а не недосмотр — на нём держится только
 > разделение аватарок между пользователями, но не доступ к сервису.
 
+## Развёртывание в Kubernetes
+
+Конфигурация упакована в Helm-чарт. Плоские манифесты в
+[deploy/k8s/rendered](deploy/k8s/rendered) генерируются из него командой
+`make k8s-render` и коммитятся: их можно читать и применять без Helm, но править
+бессмысленно — источник истины один.
+
+### Что должно быть в кластере
+
+Пустой кластер не подойдёт: без metrics-server HPA остаётся в состоянии
+`unknown`, без CRD оператора Prometheus не применяется `ServiceMonitor`.
+
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  -n ingress-nginx --create-namespace \
+  --set controller.service.type=LoadBalancer --wait
+
+# Флаг обязателен: у kubelet в k3s самоподписанный сертификат,
+# и без него metrics-server не соберёт ни одной метрики.
+helm upgrade --install metrics-server metrics-server/metrics-server \
+  -n kube-system --set 'args={--kubelet-insecure-tls}' --wait
+
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues=false \
+  --set grafana.sidecar.dashboards.searchNamespace=ALL --wait
+```
+
+### Установка
+
+```bash
+make image        # собрать образ gophprofile:dev
+make k8s-deploy   # неймспейс + helm upgrade --install
+make k8s-status
+```
+
+Неймспейс применяется отдельно и **до** Helm — так задумано. Helm пишет
+состояние релиза в Secret внутри целевого неймспейса раньше, чем применяет
+манифесты, поэтому чарт не может создать собственный неймспейс. А флаг
+`--create-namespace` создал бы его мимо релиза, без лейблов Pod Security
+Admission, и повесить их потом уже нечем.
+
+### Проверка
+
+```bash
+IP=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+curl -s -H "Host: avatars.local" "http://$IP/health"
+curl -s -H "Host: avatars.local" -H "X-User-ID: user-1" \
+  -F "file=@avatar.png" "http://$IP/api/v1/avatars"
+```
+
+Служебный порт наружу не выходит:
+
+```bash
+kubectl -n gophprofile port-forward svc/gp-gophprofile-server 8081:8081
+curl -s localhost:8081/readyz
+```
+
+### Окружения
+
+| Файл | Для чего |
+|---|---|
+| [values.yaml](deploy/helm/gophprofile/values.yaml) | значения по умолчанию, без секретов |
+| [values-dev.yaml](deploy/helm/gophprofile/values-dev.yaml) | локальный кластер: PostgreSQL, MinIO и RabbitMQ едут вместе с релизом |
+| [values-prod.yaml](deploy/helm/gophprofile/values-prod.yaml) | прод: зависимости и секреты живут снаружи релиза |
+
+```bash
+make k8s-deploy K8S_VALUES=deploy/helm/gophprofile/values-prod.yaml
+```
+
+Для прода Secret заводится вне чарта — через External Secrets, Sealed Secrets
+или SOPS — и указывается в `secrets.existingSecret`. Пароль, попавший в values,
+попадает и в историю релизов Helm, и в логи CI.
+
+### Команды
+
+```bash
+make k8s-lint     # helm lint + template на всех наборах values
+make k8s-render   # регенерация плоских манифестов
+make k8s-deploy   # неймспейс + установка
+make k8s-status   # поды, HPA, ingress, сервисы
+make k8s-logs     # логи сервера и воркера
+make k8s-delete   # удалить релиз; неймспейс и тома остаются
+```
+
+> **Сетевые политики в OrbStack не применяются.** Объекты принимаются
+> API-сервером, но трафик после них продолжает ходить: энфорсинг обеспечивает
+> CNI, а k3s в этой сборке его не делает. Локально проверяется только применение
+> манифестов; настоящая блокировка требует кластера с Calico или Cilium.
+
 ## Архитектура
+
+### Поток данных
 
 ```
         HTTP                     RabbitMQ
@@ -174,6 +288,48 @@ curl -X DELETE -H "X-User-ID: user-1" http://127.0.0.1:8080/api/v1/avatars/<id>
                         ├──► PostgreSQL (метаданные) ◄──────┤
                         └──► MinIO / S3 (файлы) ◄───────────┘
 ```
+
+### Развёртывание в кластере
+
+```
+                    ┌─ namespace gophprofile ─────────────────────────────────┐
+                    │  pod-security.kubernetes.io/enforce: restricted         │
+                    │  NetworkPolicy: default-deny + точечные разрешения       │
+                    │                                                         │
+   Интернет         │   ┌───────────────┐   HPA 2–10 по CPU 70% / RAM 80%     │
+      │             │   │  Deployment   │◄──────────── HorizontalPodAutoscaler │
+      ▼             │   │    server     │                                     │
+ ┌─────────┐  :8080 │   │  ┌─────────┐  │   :8081  ┌──────────────────┐       │
+ │ Ingress ├────────┼──►│  │ :8080   │  ├─────────►│  ServiceMonitor  │       │
+ │  nginx  │        │   │  │ :8081   │  │          └────────┬─────────┘       │
+ └─────────┘        │   │  └─────────┘  │                   │                 │
+   proxy-body-      │   └───┬───────────┘                   │                 │
+   size: 10m        │       │ PDB minAvailable 1            │                 │
+                    │       ▼                               │                 │
+                    │   ┌────────────┐  ┌────────────┐      │                 │
+                    │   │ StatefulSet│  │ StatefulSet│      │                 │
+                    │   │ postgresql │  │  rabbitmq  │◄──┐  │                 │
+                    │   └────────────┘  └────────────┘   │  │                 │
+                    │   ┌────────────┐                   │  │                 │
+                    │   │ StatefulSet│   ┌───────────────┴┐ │                 │
+                    │   │   minio    │◄──┤   Deployment   ├─┘                 │
+                    │   └────────────┘   │     worker     │  :8081            │
+                    │                    │  (без :8080)   │                   │
+                    │   ConfigMap ───────┴────────────────┘                   │
+                    │   Secret     (db-password, s3-*, rabbitmq-url)          │
+                    │   ServiceAccount без монтирования токена                │
+                    │   Job migrate — Helm-хук, до выката подов               │
+                    └────────────────┬────────────────────────────────────────┘
+                                     │ только из namespace monitoring
+                                     ▼
+                         Prometheus + Grafana + Alertmanager
+                         PrometheusRule: 8 правил алертов
+```
+
+Границу неймспейса держит `NetworkPolicy`: вход на 8080 разрешён только
+из неймспейса ingress-контроллера, вход на 8081 — только из мониторинга,
+выход — на kube-dns и на зависимости своего релиза. Публичного выхода
+в интернет у подов нет.
 
 `handlers → services → repository`, пакет `domain` не зависит ни от чего внутри проекта.
 
@@ -198,6 +354,7 @@ curl -X DELETE -H "X-User-ID: user-1" http://127.0.0.1:8080/api/v1/avatars/<id>
 | Картинки | `golang.org/x/image/draw`, `CatmullRom` |
 | Логи | `log/slog`, JSON |
 | Тесты | `testify`, `testcontainers-go`, `mockery` |
+| Оркестрация | Kubernetes 1.25+, Helm 4, ingress-nginx, Prometheus Operator |
 
 **Ограничение:** энкодера WebP в чистом Go не существует — `x/image/webp` умеет
 только декодировать. WebP принимается на загрузку, миниатюры отдаются в JPEG.
@@ -216,6 +373,8 @@ make up-obs        # окружение вместе со стеком набл�
 make logs-obs      # логи стека наблюдаемости
 make mocks         # перегенерировать моки
 make migrate-up    # накатить миграции вручную
+make k8s-lint      # проверить Helm-чарт
+make k8s-deploy    # поставить в кластер
 ```
 
 Те же проверки идут в CI на каждый push в `main`/`dev` и на каждый pull request:
@@ -247,7 +406,10 @@ make migrate-up    # накатить миграции вручную
 | `TRACING_ENABLED` | `true` | отправлять трейсы в коллектор |
 | `TRACING_ENDPOINT` | `localhost:4317` | приёмник OTLP по gRPC |
 | `TRACING_SAMPLE_RATIO` | `1.0` | доля трассируемых запросов; в разработке нужен каждый |
-| `WORKER_ADMIN_ADDR` | `:8081` | служебный порт воркера: `/metrics` и `/health` |
+| `WORKER_ADMIN_ADDR` | `:8081` | служебный порт воркера: `/metrics`, `/livez`, `/readyz` |
+| `APP_ADMIN_ADDR` | `:8081` | то же у сервера; наружу не публикуется |
+| `APP_DRAIN_DELAY` | `0s` | пауза между отказом готовности и остановкой приёма соединений; нужна в Kubernetes, локально не нужна |
+| `APP_TRUSTED_PROXY_CIDRS` | пусто | подсети прокси, чьему `X-Forwarded-For` можно верить; пусто — адрес берётся из соединения |
 
 Конфигурация проверяется на старте: сервис падает сразу, а не на первом запросе.
 В `prod` дополнительно запрещены пароли по умолчанию и wildcard в CORS.
@@ -258,17 +420,26 @@ make migrate-up    # накатить миграции вручную
 make cover
 ```
 
-Покрытие — **72%** при требовании курса >50%. Не покрыты намеренно точки входа
+Покрытие — **74,6%** при требовании курса >50%. Не покрыты намеренно точки входа
 `cmd/*` и сетевая часть RabbitMQ (подключение и publisher), которой нужен живой брокер.
+
+Helm-чарт проверяется отдельно: `make k8s-lint` прогоняет `helm lint`
+и `helm template` на всех наборах значений, а `values.schema.json` ловит
+неверные типы и диапазоны до того, как они доедут до кластера.
 
 ## Безопасность
 
 - формат определяется по сигнатуре файла, а не по заголовку от клиента;
 - `user_id` валидируется до подстановки в ключ объекта — иначе выход за пределы каталога;
 - размер изображения проверяется по заголовку до распаковки;
-- лимит частоты по адресу соединения; заголовки `X-Forwarded-For` и подобные
-  намеренно не читаются — доверенного прокси перед сервисом нет, и клиент
-  подставил бы их сам;
+- лимит частоты по адресу соединения. `X-Forwarded-For` читается, только если
+  подсети прокси перечислены явно в `APP_TRUSTED_PROXY_CIDRS`: без этого условия
+  заголовок подставит сам клиент и получит новое ведро лимита на каждый запрос.
+  В кластере список задан, а путь в обход контроллера входа закрыт сетевой
+  политикой — одно без другого не работает;
+- метрики и пробы вынесены на служебный порт, который не публикуется наружу;
+- контейнеры работают от непривилегированного пользователя, с файловой системой
+  только на чтение и без смонтированного токена доступа к API Kubernetes;
 - `X-Content-Type-Options: nosniff` — сервис отдаёт чужие файлы, и браузер
   не должен угадывать их тип;
 - `make sec` прогоняет `gosec` и `govulncheck`.

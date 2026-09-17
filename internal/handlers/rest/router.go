@@ -117,6 +117,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 		pub.Route("/web", deps.Web.Routes)
 		pub.Handle("/static/*", webui.StaticHandler())
 
+		// Спецификация и страница её просмотра. Внутри группы, а не рядом
+		// с пробами: это обычный публичный контент, и лимит частоты на нём
+		// уместен ровно так же, как на остальных страницах.
+		pub.Get("/openapi.yaml", OpenAPIHandler(deps.Log))
+		pub.Get("/docs", DocsHandler(deps.Log))
+
 		pub.Get("/", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/web/upload", http.StatusFound)
 		})
