@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "server") | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+    # Отдельный именованный порт, а не тот же http: ServiceMonitor отбирает
+    # цель по имени порта, а Ingress маршрутизирует только на http —
+    # так метрики остаются внутри кластера.
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "server") | nindent 4 }}
+---
+# У воркера нет пользовательского API, и балансировать по нему нечего.
+# Service здесь существует ради одного: дать ServiceMonitor цель для сбора
+# метрик. Отсюда clusterIP: None — адрес не нужен, нужны endpoints подов.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 4 }}

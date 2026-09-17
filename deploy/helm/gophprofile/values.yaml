@@ -1,0 +1,359 @@
+# Значения по умолчанию для чарта gophprofile.
+#
+# Файл описывает безопасный, но не запускаемый как есть контур: секретов здесь
+# нет намеренно. Готовые наборы — values-dev.yaml и values-prod.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: gophprofile
+  # Пусто — берётся appVersion из Chart.yaml.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+app:
+  env: prod
+  logLevel: info
+  requestTimeout: 60s
+  shutdownTimeout: 10s
+  # Пауза между отказом готовности и остановкой приёма соединений.
+  # Под удаляется из endpoints параллельно с доставкой SIGTERM: без паузы
+  # часть запросов уходит в процесс, который уже закрыл слушатель.
+  # terminationGracePeriodSeconds должен быть заметно больше суммы паузы
+  # и таймаута остановки.
+  drainDelay: 5s
+  maxUploadBytes: 10485760
+  maxImagePixels: 50000000
+  allowedMIME: "image/jpeg,image/png,image/webp"
+  # Пустой список валидация конфига не пропустит, а "*" запрещён в prod.
+  corsOrigins: ""
+  rateLimitRPM: 300
+  rateLimitUploadRPM: 10
+  # Подсети, чьему X-Forwarded-For можно верить. За ingress-контроллером это
+  # обязательно: иначе адресом клиента окажется адрес пода контроллера, один
+  # на весь кластер, и лимит частоты станет общим ведром для всех сразу.
+  #
+  # Условие корректности лежит вне чарта: до подов не должно быть пути в обход
+  # контроллера. Это обеспечивает networkPolicy ниже. Значение по умолчанию —
+  # диапазон подов k3s и OrbStack; на другом кластере смотреть podCIDR.
+  trustedProxyCIDRs: "10.42.0.0/16"
+
+server:
+  replicaCount: 3
+
+  # requests — то, по чему планировщик выбирает узел и от чего HPA считает
+  # загрузку. Без них автомасштабирование по процентам работать не может
+  # в принципе: проценты не от чего брать.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      # Лимита CPU нет намеренно: троттлинг на пиках даёт рост задержек
+      # там, где узел ещё свободен. Память ограничена жёстко — её утечка
+      # выселяет соседей по узлу.
+      memory: 512Mi
+
+  # Запас поверх drainDelay и shutdownTimeout, чтобы под успел закрыться сам
+  # и не получил SIGKILL посреди обработки.
+  terminationGracePeriodSeconds: 45
+
+  probes:
+    startup:
+      # Старт ждёт подключения к базе, хранилищу и брокеру. Отдельная проба
+      # даёт медленному запуску время, не растягивая интервал живости
+      # на всю остальную жизнь пода.
+      periodSeconds: 3
+      failureThreshold: 30
+    liveness:
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Раскладка по узлам. ScheduleAnyway, а не DoNotSchedule: на кластере из
+  # одного узла жёсткое требование оставило бы реплики в Pending навсегда.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+worker:
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  terminationGracePeriodSeconds: 45
+
+  probes:
+    startup:
+      periodSeconds: 3
+      failureThreshold: 30
+    liveness:
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  reconcileInterval: 1m
+  reconcileAge: 5m
+
+service:
+  type: ClusterIP
+  # Порт публичного API. Внутри контейнера это 8080.
+  port: 80
+  # Служебный порт: метрики и пробы. Ingress на него не смотрит.
+  metricsPort: 8081
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  host: avatars.local
+  path: /
+  pathType: Prefix
+  annotations:
+    # Загрузка аватарки — до 10 МБ. Значение по умолчанию у ingress-nginx
+    # меньше, и без этой аннотации запрос отвергается ещё на прокси,
+    # не доходя до сервиса.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+  tls: []
+
+autoscaling:
+  server:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleUp:
+        # Реакция на рост быстрая: очередь запросов копится, пока подов мало.
+        stabilizationWindowSeconds: 30
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 30
+      scaleDown:
+        # Сворачивание медленное. Пятиминутное окно гасит колебания:
+        # иначе после каждого всплеска реплики убирались бы и тут же
+        # поднимались обратно.
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 50
+            periodSeconds: 60
+
+  # Воркер упирается не в процессор, а в длину очереди: при пустой очереди
+  # он почти не потребляет CPU, и масштабирование по нему бессмысленно —
+  # реплики свернутся ровно тогда, когда работа только накапливается.
+  # Честное решение — метрика длины очереди через KEDA или адаптер Prometheus,
+  # и это уже за рамками спринта. Поэтому по умолчанию выключено.
+  worker:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    behavior: {}
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    # Лейблы, по которым Prometheus отбирает ServiceMonitor. Пусто подходит
+    # для kube-prometheus-stack с serviceMonitorSelectorNilUsesHelmValues=false.
+    labels: {}
+  prometheusRule:
+    enabled: true
+    labels: {}
+  grafanaDashboards:
+    enabled: true
+    # Лейбл, по которому сайдкар Grafana подбирает ConfigMap с дашбордами.
+    label: grafana_dashboard
+
+networkPolicy:
+  enabled: true
+  # Неймспейс ingress-контроллера. Подбор идёт по лейблу kubernetes.io/metadata.name,
+  # который kubelet проставляет каждому неймспейсу автоматически начиная с 1.21 —
+  # свои лейблы вешать не требуется.
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  dnsNamespace: kube-system
+  # Дополнительные правила исхода: внешняя база, S3 за пределами кластера,
+  # приёмник трейсов. Вставляются в egress как есть.
+  extraEgress: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # Приложение не обращается к API-серверу Kubernetes. Токен, смонтированный
+  # в под, при этом остаётся полноценным доступом к API от имени этой учётной
+  # записи — отключить его и есть настоящий минимум прав.
+  automountToken: false
+
+# Роль не создаётся по умолчанию по той же причине: давать права незачем.
+# Блок оставлен точкой расширения, если приложению однажды понадобится API.
+rbac:
+  create: false
+  rules: []
+
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  # Образ ничего не пишет на диск, кроме временных файлов multipart.
+  # Под них смонтирован emptyDir на /tmp.
+  readOnlyRootFilesystem: true
+
+tmpVolumeSize: 128Mi
+
+migrations:
+  # Схему меняет отдельный Job-хук, а не каждая реплика при старте:
+  # при нескольких репликах это была бы гонка, а изменение схемы прикладным
+  # процессом мешает откатывать релиз.
+  enabled: true
+  # Фаза хука. pre-install,pre-upgrade — правильный выбор: схема обновляется
+  # до выката подов, и новый код не стартует на старой схеме. Работает, когда
+  # база существует независимо от релиза.
+  #
+  # Если база едет тем же релизом (postgresql.enabled=true), фазу приходится
+  # менять на post-install,post-upgrade: hook-фаза pre выполняется раньше всех
+  # обычных ресурсов чарта, и джоб ждал бы ещё не созданный Service базы.
+  hook: "pre-install,pre-upgrade"
+  # 0 — джоб не ретраится. Без этого упавшая миграция крутится в фоне,
+  # а хук висит вместо того, чтобы быстро упасть с понятной ошибкой.
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+database:
+  # Заполняется, только когда postgresql.enabled=false.
+  host: ""
+  port: 5432
+  name: avatars
+  user: avatars
+  sslMode: require
+  maxConns: 10
+  minConns: 2
+
+s3:
+  # Заполняется, только когда minio.enabled=false.
+  endpoint: ""
+  bucket: avatars
+  region: us-east-1
+  useSSL: true
+
+rabbitmq:
+  # true — RabbitMQ поднимается в кластере вместе с релизом.
+  enabled: false
+  # Заполняется, только когда enabled=false. Содержит пароль, поэтому уезжает
+  # в Secret, а не в ConfigMap.
+  url: ""
+  auth:
+    username: guest
+    password: ""
+  storage:
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  exchange: avatars.exchange
+  queues:
+    process: avatars.process
+    delete: avatars.delete
+    retry: avatars.retry
+    dead: avatars.dead
+  retryTTL: 30s
+  maxRetries: 5
+  prefetch: 4
+
+# Встроенные зависимости. Это учебный контур для локального кластера:
+# один экземпляр, без репликации и резервных копий. В продакшене
+# всё это выключается, а сервисы приезжают снаружи.
+postgresql:
+  enabled: false
+  image: postgres:16-alpine
+  storage:
+    size: 2Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+minio:
+  enabled: false
+  image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+  storage:
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+tracing:
+  enabled: false
+  endpoint: ""
+  sampleRatio: 0.1
+
+secrets:
+  # Имя готового Secret с ключами db-password, s3-access-key, s3-secret-key
+  # и rabbitmq-url; при rabbitmq.enabled=true нужен ещё rabbitmq-password.
+  # Задано — чарт свой Secret не создаёт, и настоящие пароли в values
+  # не попадают вовсе.
+  existingSecret: ""
+  dbPassword: ""
+  s3AccessKey: ""
+  s3SecretKey: ""

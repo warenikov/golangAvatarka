@@ -1,0 +1,149 @@
+---
+# Source: gophprofile/templates/server-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gp-gophprofile-server
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: server
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gophprofile
+        app.kubernetes.io/instance: gp
+        app.kubernetes.io/component: server
+      annotations:
+        # Без контрольных сумм правка конфигурации не доходит до работающих
+        # подов: ConfigMap и Secret подключены переменными окружения, а они
+        # читаются один раз при старте процесса. Изменение суммы меняет
+        # шаблон пода и запускает обычный перевыкат.
+        checksum/config: 791e9de3acd36ceb5ccd7696d9e2a53c3d57b2a68b291fdd30efc2c5f2934741
+        checksum/secret: be412f70df45471ec28927db94a44f16e6190ec37e050d42aba89c628410dfc9
+    spec:
+      serviceAccountName: gp-gophprofile
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Запас поверх drainDelay и shutdownTimeout: под должен успеть закрыться
+      # сам, иначе его добьёт SIGKILL посреди обработки запроса.
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: server
+          maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+      containers:
+        - name: server
+          image: gophprofile:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Метрики и пробы. Service отдаёт его отдельным портом, Ingress
+            # на него не смотрит: в метках метрик внутреннее устройство сервиса.
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: gp-gophprofile-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: db-password
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: s3-secret-key
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: rabbitmq-url
+          # Старт ждёт подключения к базе, хранилищу и брокеру. Отдельная проба
+          # даёт запуску время, не растягивая интервал живости на всю жизнь пода:
+          # без неё пришлось бы ставить большой initialDelaySeconds у liveness
+          # и зависший под простаивал бы столько же.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: 3
+            failureThreshold: 30
+          # Живость смотрит только на сам процесс. Состояние базы и брокера сюда
+          # не входит: перезапуск их не поднимет, а разом убьёт все исправные
+          # реплики и превратит частичный отказ в полный.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Готовность смотрит на зависимости: принимать трафик без базы
+          # и хранилища нечем. Здесь отказ правильный — под убирают
+          # из балансировки, не перезапуская.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            limits:
+              memory: 384Mi
+            requests:
+              cpu: 50m
+              memory: 96Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+

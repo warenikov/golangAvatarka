@@ -1,0 +1,149 @@
+---
+# Source: gophprofile/templates/migrate-job.yaml
+# Миграции схемы как хук релиза.
+#
+# Схему меняет ровно одна задача, а не каждая реплика при старте: при трёх
+# репликах одновременный goose — гонка, а изменение схемы прикладным процессом
+# мешает откатывать релиз. Поэтому APP_AUTO_MIGRATE в ConfigMap выключен.
+#
+# Фаза хука задаётся значением migrations.hook, и выбор здесь не косметический.
+#
+# pre-install,pre-upgrade — правильная фаза: Helm дожидается джоба до выката
+# подов, и новый код никогда не стартует на старой схеме. Она требует, чтобы
+# база уже существовала: hook-фазы выполняются раньше всех обычных ресурсов
+# релиза.
+#
+# post-install,post-upgrade нужна там, где база едет тем же релизом
+# (postgresql.enabled=true): до неё ресурсы чарта ещё не созданы, и pre-хук
+# ждал бы несуществующий Service до самого таймаута. Плата — окно, в котором
+# новый код работает на старой схеме. Для учебного контура приемлемо,
+# для продакшена — нет, там база живёт снаружи и фаза остаётся pre.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gp-gophprofile-migrate
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": "post-install,post-upgrade"
+    "helm.sh/hook-weight": "0"
+    # Предыдущий джоб удаляется перед созданием нового: имя одно и то же,
+    # а спецификация Job неизменяема после создания.
+    "helm.sh/hook-delete-policy": before-hook-creation
+    # Логи контейнера попадают в вывод helm при падении хука. Без этого
+    # диагностика упавшей миграции начинается с поиска уже удалённого пода.
+    "helm.sh/hook-output-log-policy": hook-failed
+spec:
+  # Ноль: упавшая миграция должна упасть сразу и с понятной ошибкой, а не
+  # крутиться в фоне, пока helm ждёт истечения таймаута.
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gophprofile
+        app.kubernetes.io/instance: gp
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: gp-gophprofile
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # База едет тем же релизом и поднимается не мгновенно. Без ожидания джоб
+      # падает на первом же подключении и уносит с собой всю установку.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER"; do
+                echo "жду postgres на $DB_HOST"
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: DB_HOST
+              value: "gp-gophprofile-postgresql"
+            - name: DB_USER
+              value: "avatars"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      containers:
+        - name: migrate
+          image: gophprofile:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/migrate", "up"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: gp-gophprofile-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: db-password
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: s3-secret-key
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: rabbitmq-url
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+

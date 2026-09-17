@@ -1,0 +1,44 @@
+{{- range $component := list "server" "worker" }}
+{{- $scaling := index $.Values.autoscaling $component }}
+{{- if $scaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "gophprofile.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "gophprofile.fullname" $ }}-{{ $component }}
+  minReplicas: {{ $scaling.minReplicas }}
+  maxReplicas: {{ $scaling.maxReplicas }}
+  # Проценты считаются от resources.requests, а не от лимитов. Без requests
+  # автомасштабирование по Utilization не работает в принципе: проценты
+  # не от чего брать, и HPA остаётся в состоянии unknown.
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $scaling.targetCPUUtilizationPercentage }}
+    # Память как второй сигнал. Она сама по себе плохой повод добавлять
+    # реплики — процесс с утечкой утащит за собой весь набор, — но
+    # обработка картинок держит декодированный кадр целиком в памяти,
+    # и рост числа параллельных загрузок виден здесь раньше, чем в CPU.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $scaling.targetMemoryUtilizationPercentage }}
+  {{- with $scaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

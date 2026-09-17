@@ -1,0 +1,150 @@
+# Продакшен.
+#
+# Отличие от стенда не в размерах, а в принципе: база, хранилище и брокер
+# живут вне релиза. Данные не должны удаляться вместе с `helm uninstall`,
+# а их обслуживание — резервные копии, обновления, переключение на реплику —
+# не дело прикладного чарта.
+#
+# Паролей здесь нет и быть не должно. Secret заводится снаружи — через
+# External Secrets, Sealed Secrets или SOPS — и подключается по имени.
+# Пароль, попавший в values, попадает и в историю релизов Helm, и в CI-логи,
+# и в тот чат, куда values однажды перешлют.
+
+image:
+  # Пусто — берётся appVersion из Chart.yaml. Конкретный тег передаётся
+  # при выкате: --set image.tag=$GIT_SHA. Latest в проде не бывает.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+app:
+  env: prod
+  logLevel: info
+  # Сумма drainDelay и shutdownTimeout должна умещаться
+  # в terminationGracePeriodSeconds с запасом.
+  drainDelay: 10s
+  shutdownTimeout: 20s
+  corsOrigins: "https://avatars.example.com"
+  rateLimitRPM: 600
+  rateLimitUploadRPM: 20
+  # Подсеть подов кластера. Смотреть podCIDR своего кластера, а не копировать:
+  # слишком широкий диапазон здесь означает доверие к X-Forwarded-For от того,
+  # кому доверять не следует.
+  trustedProxyCIDRs: "10.42.0.0/16"
+
+server:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+  terminationGracePeriodSeconds: 60
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+worker:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+  terminationGracePeriodSeconds: 60
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+ingress:
+  enabled: true
+  className: nginx
+  host: avatars.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    - hosts:
+        - avatars.example.com
+      secretName: gophprofile-tls
+
+autoscaling:
+  server:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+migrations:
+  # База существует независимо от релиза, поэтому фаза правильная: схема
+  # обновляется до выката подов, и новый код не стартует на старой схеме.
+  hook: "pre-install,pre-upgrade"
+
+postgresql:
+  enabled: false
+
+minio:
+  enabled: false
+
+rabbitmq:
+  enabled: false
+  # Полный URL с учётными данными приезжает в existingSecret ключом
+  # rabbitmq-url. Здесь его нет намеренно.
+  url: ""
+
+database:
+  host: postgres.example.internal
+  port: 5432
+  name: avatars
+  user: avatars
+  # Трафик до базы выходит за пределы кластера — только по TLS.
+  sslMode: require
+  maxConns: 20
+  minConns: 5
+
+s3:
+  endpoint: s3.example.com
+  bucket: avatars
+  region: ru-central1
+  useSSL: true
+
+networkPolicy:
+  enabled: true
+  # Всё, что снаружи кластера, открывается явными правилами. Общего выхода
+  # в интернет у подов нет: скомпрометированный контейнер не сможет
+  # ни выгрузить данные, ни дотянуться до чужой сети.
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 5672
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+tracing:
+  enabled: true
+  endpoint: jaeger-collector.observability:4317
+  # Полный сбор на боевом потоке слишком дорог по хранилищу и по задержке.
+  sampleRatio: 0.1
+
+secrets:
+  # Обязательно к заполнению. Без него чарт создаст Secret из values,
+  # то есть потребует положить пароли в этот файл.
+  existingSecret: ""

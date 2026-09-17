@@ -1,0 +1,232 @@
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+# Сетевые политики неймспейса.
+#
+# Логика построена от запрета: первая политика закрывает весь вход и выход,
+# остальные добавляют точечные разрешения. Политики складываются объединением,
+# запрещающих правил в NetworkPolicy не бывает — «запретить всё, кроме»
+# выражается только так.
+#
+# Самая частая ошибка в этом месте — забыть исход на DNS. Под с закрытым egress
+# не резолвит ни одно имя, и отказ выглядит как «база недоступна», хотя сеть
+# до базы открыта: приложение просто не может превратить имя Service в адрес.
+#
+# ВАЖНО: энфорсинг обеспечивает CNI, а не сам Kubernetes. Kubernetes из OrbStack
+# (k3s) объекты принимает, но трафик не фильтрует — проверено. Локально
+# проверяется только применение манифестов; настоящая блокировка требует
+# кластера с Calico или Cilium.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-default-deny
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+spec:
+  # Пустой podSelector — все поды неймспейса, включая зависимости.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-dns
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        # UDP — обычный путь. TCP нужен для ответов, не помещающихся в дейтаграмму:
+        # резолвер переспрашивает по TCP, и без этого порта часть запросов
+        # молча отваливается по таймауту.
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-server-ingress
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+  ingress:
+    # Публичный порт открыт только контроллеру входа. Это не только про доступ:
+    # на этом и держится доверие к X-Forwarded-For. Если бы до пода был путь
+    # в обход контроллера, заголовок подделал бы кто угодно и получил бы
+    # свежее ведро лимита частоты на каждый запрос.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Служебный порт — только Prometheus. Наружу он не выходит вовсе.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-worker-ingress
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Ingress
+  ingress:
+    # Воркер не принимает пользовательского трафика вовсе. Единственный вход —
+    # сбор метрик.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8081
+
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-app-egress
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+spec:
+  # Сервер, воркер и джоб миграций ходят в одни и те же места.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [server, worker, migrate]
+  policyTypes:
+    - Egress
+  egress:
+    # Встроенные зависимости живут в этом же неймспейсе и адресуются
+    # по лейблам, а не по адресам: адреса подов меняются при каждом рестарте.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gophprofile
+              app.kubernetes.io/instance: gp
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gophprofile
+              app.kubernetes.io/instance: gp
+              app.kubernetes.io/component: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gophprofile
+              app.kubernetes.io/instance: gp
+              app.kubernetes.io/component: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+
+---
+# Source: gophprofile/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gp-gophprofile-deps-ingress
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+spec:
+  # Зависимости принимают только от приложения этого же релиза. Ни другой
+  # неймспейс, ни чужой под в этом неймспейсе до них не достучится.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [postgresql, minio, rabbitmq]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [server, worker, migrate]
+

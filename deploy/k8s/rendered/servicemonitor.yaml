@@ -1,0 +1,88 @@
+---
+# Source: gophprofile/templates/servicemonitor.yaml
+# Цель для Prometheus Operator. Статических целей в кластере быть не может:
+# поды переезжают и меняют адреса при каждом выкате и каждом решении HPA.
+# Оператор следит за endpoints Service и переписывает конфигурацию сам.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gp-gophprofile-server
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: server
+spec:
+  namespaceSelector:
+    matchNames:
+      - gophprofile
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: server
+  endpoints:
+    # Порт задаётся именем, а не номером: у сервера на 8080 висит публичный API,
+    # и промах по порту означал бы сбор метрик через тот же вход, который
+    # смотрит наружу.
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      scheme: http
+      relabelings:
+        # Имя пода в метке: без него все реплики сливаются в одну кривую,
+        # и понять, что отказала конкретная из них, невозможно.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - targetLabel: component
+          replacement: server
+
+---
+# Source: gophprofile/templates/servicemonitor.yaml
+# Цель для Prometheus Operator. Статических целей в кластере быть не может:
+# поды переезжают и меняют адреса при каждом выкате и каждом решении HPA.
+# Оператор следит за endpoints Service и переписывает конфигурацию сам.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gp-gophprofile-worker
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: worker
+spec:
+  namespaceSelector:
+    matchNames:
+      - gophprofile
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: worker
+  endpoints:
+    # Порт задаётся именем, а не номером: у сервера на 8080 висит публичный API,
+    # и промах по порту означал бы сбор метрик через тот же вход, который
+    # смотрит наружу.
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      scheme: http
+      relabelings:
+        # Имя пода в метке: без него все реплики сливаются в одну кривую,
+        # и понять, что отказала конкретная из них, невозможно.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - targetLabel: component
+          replacement: worker
+

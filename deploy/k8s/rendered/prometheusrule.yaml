@@ -1,0 +1,127 @@
+---
+# Source: gophprofile/templates/prometheusrule.yaml
+# Правила алертов. Те же, что работали в compose со спринта 2, — переложены
+# на объект оператора и сужены до неймспейса релиза.
+#
+# Шаблоны Prometheus в аннотациях экранированы обратными кавычками внутри
+# действия Helm: подстановки вида «доллар labels точка pod» — синтаксис
+# Prometheus, и Helm обязан пропустить их в манифест как текст, а не
+# пытаться выполнить. Без экранирования рендер падает на неизвестной
+# переменной — причём даже внутри YAML-комментария: комментарии YAML
+# для шаблонизатора Helm ничем не отличаются от остального текста.
+#
+# Правил намеренно немного: алерт, на который перестают реагировать, хуже
+# отсутствующего. Каждое отвечает на вопрос «что сломано для пользователя».
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gp-gophprofile
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+spec:
+  groups:
+    - name: gophprofile-availability
+      rules:
+        - alert: GophProfileTargetDown
+          # Цели отбираются по неймспейсу: в кластере живут метрики многих
+          # сервисов, и правило без этого условия сработало бы на чужие.
+          expr: up{namespace="gophprofile", component=~"server|worker"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.component }} не отвечает"
+            description: "Prometheus не снимает метрики с пода {{ $labels.pod }} дольше двух минут."
+
+        # Сумма по неймспейсу, а не по поду: одна упавшая реплика из десяти
+        # даёт всплеск на своей кривой, но пользователи её почти не замечают.
+        # Тревожит доля ошибок во всём сервисе.
+        - alert: GophProfileHighErrorRate
+          expr: >-
+            sum(rate(http_requests_total{namespace="gophprofile", status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_requests_total{namespace="gophprofile"}[5m])), 0.001) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Более 5% ответов — 5xx"
+            description: "Доля серверных ошибок держится выше 5% пять минут подряд."
+
+        # Под, который постоянно перезапускается, формально «жив»: между
+        # рестартами он отвечает на пробы, и ни один из остальных алертов
+        # его не ловит. В кластере это самый частый способ тихо деградировать.
+        - alert: GophProfilePodRestarting
+          expr: >-
+            increase(kube_pod_container_status_restarts_total{namespace="gophprofile"}[15m]) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Под {{ $labels.pod }} перезапускается"
+            description: "{{ $value }} перезапусков за 15 минут. Смотреть kubectl logs --previous."
+
+    - name: gophprofile-processing
+      rules:
+        # Отставание важнее скорости: пользователь видит оригинал вместо
+        # миниатюры, пока воркер не разгребёт очередь.
+        - alert: GophProfileProcessingBacklog
+          expr: avatar_processing_backlog{namespace="gophprofile"} > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Очередь обработки не разгребается"
+            description: "{{ $value }} аватарок ждут обработки дольше допустимого. Воркер не справляется, упал или потерял соединение с брокером."
+
+        - alert: GophProfileEventsDeadLettered
+          expr: increase(avatar_events_dead_lettered_total{namespace="gophprofile"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "События уходят в очередь разбора"
+            description: "За 15 минут {{ $value }} событий исчерпали попытки обработки. Эти аватарки останутся без миниатюр до ручного вмешательства."
+
+        - alert: GophProfileUploadFailureRate
+          expr: >-
+            sum(rate(avatar_uploads_total{namespace="gophprofile", result="error"}[10m]))
+            / clamp_min(sum(rate(avatar_uploads_total{namespace="gophprofile"}[10m])), 0.001) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Каждая десятая загрузка не проходит"
+            description: "Проверить доступность хранилища и базы."
+
+        - alert: GophProfileProcessingTooSlow
+          expr: >-
+            histogram_quantile(0.95,
+              sum(rate(avatar_processing_duration_seconds_bucket{namespace="gophprofile"}[10m])) by (le)) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Обработка миниатюр замедлилась"
+            description: "p95 построения миниатюр держится выше 5 секунд."
+    - name: gophprofile-scaling
+      rules:
+        # Упёршийся в потолок HPA — это отказ, до которого ещё есть время
+        # что-то сделать. Дальше расти некуда, и следующий всплеск придётся
+        # на уже насыщенные реплики.
+        - alert: GophProfileAutoscalerAtMax
+          expr: >-
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="gophprofile"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{namespace="gophprofile"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.horizontalpodautoscaler }} упёрся в максимум реплик"
+            description: "Автомасштабирование исчерпано: запаса на следующий всплеск нет."
+
