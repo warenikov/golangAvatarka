@@ -17,23 +17,39 @@ const (
 	serverWriteTimeout      = 30 * time.Second
 )
 
-// Server — служебный HTTP-сервер для процессов без собственного API.
+// AdminRoutes — обработчики проверок состояния для служебного сервера.
+// Пустое поле означает, что маршрут не регистрируется.
+type AdminRoutes struct {
+	Live  http.HandlerFunc
+	Ready http.HandlerFunc
+}
+
+// Server — служебный HTTP-сервер: метрики и проверки состояния.
 //
-// Воркер до сих пор не отдавал ни метрик, ни состояния: половина показателей
-// сервиса — обработка миниатюр, ретраи, отставание очереди — живёт именно
-// в нём, и снять их было неоткуда.
+// Его слушают оба процесса, но по разным причинам. Воркер не имеет своего API,
+// и снять с него метрики было бы неоткуда. У сервера API есть, но держать
+// на нём /metrics нельзя: публичный порт смотрит наружу через Ingress,
+// а в метках метрик лежит внутреннее устройство сервиса.
 type Server struct {
 	srv *http.Server
 	log *slog.Logger
 }
 
-// NewServer собирает сервер с /metrics и /health.
-func NewServer(addr string, reg *prometheus.Registry, health http.HandlerFunc, log *slog.Logger) *Server {
+// NewServer собирает сервер с /metrics, /livez и /readyz.
+//
+// /health остаётся синонимом готовности: эндпоинт описан в API с первого
+// спринта, и ломать его ради переименования незачем.
+func NewServer(addr string, reg *prometheus.Registry, routes AdminRoutes, log *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
-	if health != nil {
-		mux.HandleFunc("GET /health", health)
+	if routes.Live != nil {
+		mux.HandleFunc("GET /livez", routes.Live)
+	}
+
+	if routes.Ready != nil {
+		mux.HandleFunc("GET /readyz", routes.Ready)
+		mux.HandleFunc("GET /health", routes.Ready)
 	}
 
 	return &Server{

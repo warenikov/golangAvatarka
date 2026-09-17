@@ -27,6 +27,8 @@ const (
 	readTimeout       = 60 * time.Second
 	writeTimeout      = 60 * time.Second
 	idleTimeout       = 120 * time.Second
+
+	healthTimeout = 2 * time.Second
 )
 
 func main() {
@@ -151,20 +153,36 @@ func run() error {
 	uploadLimiter := rest.UploadRateLimiter(log.With("component", "ratelimit"), cfg.App.RateLimitUpload)
 	webHandler := webui.NewHandler(avatarSvc, cfg, log.With("component", "web"), uploadLimiter)
 
+	// Причина отказа компонента раскрывается только вне прода: текст ошибки
+	// подключения выдаёт адреса и учётные записи инфраструктуры.
+	health := rest.NewHealthHandler(log.With("component", "health"), cfg.App.Version,
+		healthTimeout, !cfg.IsProd(),
+		postgres.NewHealthChecker(pool),
+		s3.NewHealthChecker(storage),
+		rabbitmq.NewHealthChecker(conn),
+	)
+
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,
 		Metrics:       httpMetrics,
-		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
 		Web:           webHandler,
+		Health:        health,
 		UploadLimiter: uploadLimiter,
-		Checkers: []rest.Checker{
-			postgres.NewHealthChecker(pool),
-			s3.NewHealthChecker(storage),
-			rabbitmq.NewHealthChecker(conn),
-		},
 	})
+
+	// Служебный слушатель переживает остановку основного: пока под сливает
+	// соединения, оркестратор продолжает опрашивать готовность, и ответ
+	// «сливаюсь» должен доходить. Контекст без отмены родителем — сигнал
+	// гасит основной сервер, а не этот.
+	adminCtx, stopAdmin := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopAdmin()
+
+	admin := observability.NewServer(cfg.App.AdminAddr, registry,
+		observability.AdminRoutes{Live: health.Live, Ready: health.Ready},
+		log.With("component", "admin"))
+	go admin.Run(adminCtx)
 
 	srv := &http.Server{
 		Addr:              cfg.App.HTTPAddr,
@@ -191,12 +209,26 @@ func run() error {
 		log.Info("получен сигнал, останавливаем сервер", "timeout", cfg.App.ShutdownTimeout.String())
 	}
 
+	// Сначала отказ готовности, и только потом остановка приёма соединений.
+	// В Kubernetes удаление пода из endpoints идёт параллельно с доставкой
+	// сигнала, и без паузы часть запросов успевает прийти в процесс, который
+	// уже закрыл слушатель, — клиент получает разрыв вместо ответа.
+	health.Drain()
+
+	if cfg.App.DrainDelay > 0 {
+		log.Info("готовность отключена, ждём вывода из балансировки",
+			"delay", cfg.App.DrainDelay.String())
+		time.Sleep(cfg.App.DrainDelay)
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.App.ShutdownTimeout)
 	defer cancel()
 
 	if err = srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
+
+	stopAdmin()
 
 	log.Info("сервер остановлен")
 

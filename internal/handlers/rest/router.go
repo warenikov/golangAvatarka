@@ -7,8 +7,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"go-avatar-service/internal/config"
@@ -24,13 +22,16 @@ const corsMaxAge = 300
 const serverSpanName = "http.server"
 
 type RouterDeps struct {
-	Config   *config.Config
-	Log      *slog.Logger
-	Metrics  *observability.HTTP
-	Registry *prometheus.Registry
-	Avatars  *AvatarHandler
-	Web      *webui.Handler
-	Checkers []Checker
+	Config  *config.Config
+	Log     *slog.Logger
+	Metrics *observability.HTTP
+	Avatars *AvatarHandler
+	Web     *webui.Handler
+
+	// Health обслуживает /health, /livez и /readyz. Обработчик приходит
+	// снаружи, а не собирается здесь: тот же экземпляр слушает служебный порт
+	// и получает команду на слив при остановке.
+	Health *HealthHandler
 
 	// UploadLimiter — общий ограничитель загрузок для REST и веб-формы.
 	// Если не задан, отдельного лимита на загрузку нет.
@@ -60,57 +61,65 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(RequestLogger(deps.Log))
 	r.Use(Metrics(deps.Metrics))
 	r.Use(SecurityHeaders)
+	r.Use(ClientIP(app.TrustedProxyCIDRs))
 
-	// Порядок важен. Адрес клиента резолвится до лимитеров, иначе ключ пуст
-	// и все запросы делят одно ведро на всех. Лимит по адресу идёт раньше
-	// лимита по пользователю: он ограничивает и число ключей, которыми можно
-	// набить таблицу счётчиков подставным X-User-ID.
-	r.Use(middleware.ClientIPFromRemoteAddr)
-	r.Use(rateLimiter(deps.Log, app.RateLimitRPM, clientIPKey))
-	r.Use(rateLimiter(deps.Log, app.RateLimitRPM, userKey))
-
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins: app.CORSOrigins,
-		AllowedMethods: []string{
-			http.MethodGet, http.MethodHead, http.MethodPost, http.MethodDelete, http.MethodOptions,
-		},
-		AllowedHeaders: []string{"Accept", "Content-Type", "If-None-Match", headerUserID},
-		// ETag не входит в список заголовков, видимых кросс-доменному JS
-		// по умолчанию: без этого условные запросы с фронта не соберутся.
-		ExposedHeaders:   []string{"ETag", "X-Avatar-Fallback"},
-		AllowCredentials: false,
-		MaxAge:           corsMaxAge,
-	}))
-
-	r.Use(middleware.Timeout(app.RequestTimeout))
-
-	// Загрузка дороже чтения: 10 МБ тела, запись в хранилище и работа воркера.
-	// Для неё отдельный, более строгий лимит.
-	uploadLimit := deps.UploadLimiter
-	if uploadLimit == nil {
-		uploadLimit = func(next http.Handler) http.Handler { return next }
+	// Проверки состояния идут мимо ограничителей частоты и таймаута запроса.
+	// Иначе диагностика отказывает ровно тогда, когда нужнее всего: под
+	// наплывом трафика лимитер начал бы отвечать на них 429, и оркестратор
+	// прочитал бы это как отказ сервиса.
+	if deps.Health != nil {
+		r.Get("/health", deps.Health.Ready)
+		r.Get("/livez", deps.Health.Live)
+		r.Get("/readyz", deps.Health.Ready)
 	}
 
-	health := NewHealthHandler(deps.Log, app.Version, healthTimeout, !deps.Config.IsProd(), deps.Checkers...)
-	r.Get("/health", health.Handle)
-	r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
+	r.Group(func(pub chi.Router) {
+		// Порядок важен. Адрес клиента резолвится выше по цепочке, иначе ключ
+		// пуст и все запросы делят одно ведро на всех. Лимит по адресу идёт
+		// раньше лимита по пользователю: он ограничивает и число ключей,
+		// которыми можно набить таблицу счётчиков подставным X-User-ID.
+		pub.Use(rateLimiter(deps.Log, app.RateLimitRPM, clientIPKey))
+		pub.Use(rateLimiter(deps.Log, app.RateLimitRPM, userKey))
 
-	r.Route("/api/v1", func(api chi.Router) {
-		api.With(uploadLimit).Post("/avatars", deps.Avatars.Upload)
-		api.Get("/avatars/{avatar_id}", deps.Avatars.Get)
-		api.Get("/avatars/{avatar_id}/metadata", deps.Avatars.Metadata)
-		api.Delete("/avatars/{avatar_id}", deps.Avatars.Delete)
+		pub.Use(cors.Handler(cors.Options{
+			AllowedOrigins: app.CORSOrigins,
+			AllowedMethods: []string{
+				http.MethodGet, http.MethodHead, http.MethodPost, http.MethodDelete, http.MethodOptions,
+			},
+			AllowedHeaders: []string{"Accept", "Content-Type", "If-None-Match", headerUserID},
+			// ETag не входит в список заголовков, видимых кросс-доменному JS
+			// по умолчанию: без этого условные запросы с фронта не соберутся.
+			ExposedHeaders:   []string{"ETag", "X-Avatar-Fallback"},
+			AllowCredentials: false,
+			MaxAge:           corsMaxAge,
+		}))
 
-		api.Get("/users/{user_id}/avatar", deps.Avatars.GetCurrent)
-		api.Get("/users/{user_id}/avatars", deps.Avatars.List)
-		api.Delete("/users/{user_id}/avatar", deps.Avatars.DeleteCurrent)
-	})
+		pub.Use(middleware.Timeout(app.RequestTimeout))
 
-	r.Route("/web", deps.Web.Routes)
-	r.Handle("/static/*", webui.StaticHandler())
+		// Загрузка дороже чтения: 10 МБ тела, запись в хранилище и работа воркера.
+		// Для неё отдельный, более строгий лимит.
+		uploadLimit := deps.UploadLimiter
+		if uploadLimit == nil {
+			uploadLimit = func(next http.Handler) http.Handler { return next }
+		}
 
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/web/upload", http.StatusFound)
+		pub.Route("/api/v1", func(api chi.Router) {
+			api.With(uploadLimit).Post("/avatars", deps.Avatars.Upload)
+			api.Get("/avatars/{avatar_id}", deps.Avatars.Get)
+			api.Get("/avatars/{avatar_id}/metadata", deps.Avatars.Metadata)
+			api.Delete("/avatars/{avatar_id}", deps.Avatars.Delete)
+
+			api.Get("/users/{user_id}/avatar", deps.Avatars.GetCurrent)
+			api.Get("/users/{user_id}/avatars", deps.Avatars.List)
+			api.Delete("/users/{user_id}/avatar", deps.Avatars.DeleteCurrent)
+		})
+
+		pub.Route("/web", deps.Web.Routes)
+		pub.Handle("/static/*", webui.StaticHandler())
+
+		pub.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/web/upload", http.StatusFound)
+		})
 	})
 
 	return r
