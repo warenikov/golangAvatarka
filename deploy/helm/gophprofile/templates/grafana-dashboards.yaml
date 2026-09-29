@@ -4,9 +4,14 @@
 # через файлы, как в compose, в кластере не работает: файловой системы,
 # общей с Grafana, здесь нет.
 #
-# Файл — копия docker/observability/grafana/dashboards: Helm читает только
-# то, что лежит внутри каталога чарта, снаружи ему файлы недоступны.
+# overview.json — копия docker/observability/grafana/dashboards: Helm читает
+# только то, что лежит внутри каталога чарта, снаружи ему файлы недоступны.
 # Копию обновляет `make k8s-render`, чтобы два контура не разъезжались.
+#
+# cluster.json есть только здесь: он строится на kube-state-metrics,
+# которых в compose нет. CPU и память сервера и воркера берутся из метрик
+# самого процесса, а не из cAdvisor — kubelet OrbStack контейнерных
+# метрик не отдаёт, и панели на них остались бы пустыми.
 apiVersion: v1
 kind: ConfigMap
 metadata:
