@@ -149,12 +149,13 @@ func run() error {
 		return fmt.Errorf("breaker metrics: %w", err)
 	}
 
-	storage = storage.WithBreaker(breaker.New("s3", cfg.Breaker, breakerMetrics))
+	storage = storage.WithBreaker(breakerMetrics.NewBreaker("s3", cfg.Breaker))
 	publisher = publisher.WithMetrics(businessMetrics).
-		WithBreaker(breaker.New("rabbitmq", cfg.Breaker, breakerMetrics))
+		WithBreaker(breakerMetrics.NewBreaker("rabbitmq", cfg.Breaker))
 
 	repo := postgres.NewAvatarRepository(pool).
-		WithBreaker(breaker.New("postgres", cfg.Breaker, breakerMetrics))
+		WithBreaker(breakerMetrics.NewBreaker("postgres", cfg.Breaker,
+			breaker.WithHealthyErrors(postgres.IsDataError)))
 	avatarSvc := services.NewAvatarService(repo, storage, publisher, log,
 		services.WithMetrics(businessMetrics))
 

@@ -34,22 +34,42 @@ func (s State) String() string {
 	}
 }
 
-// Observer получает события выключателя, например для метрик.
+// Причины, по которым выключатель отклоняет вызов.
+const (
+	// RejectOpen — выключатель разомкнут, зависимость считается недоступной.
+	RejectOpen = "open"
+	// RejectProbing — выключатель полуоткрыт, и все пробные места уже заняты.
+	RejectProbing = "probing"
+)
+
+// Observer получает отказы выключателя, например для метрик.
 type Observer interface {
-	BreakerStateChanged(dependency string, state State)
-	BreakerRejected(dependency string)
+	BreakerRejected(dependency, reason string)
+}
+
+// Option настраивает выключатель.
+type Option func(*Breaker)
+
+// WithHealthyErrors задаёт ошибки, которые зависимость возвращает в исправном
+// состоянии: отказ по данным запроса, а не сбой. Такие ошибки счётчик не трогают.
+func WithHealthyErrors(fn func(error) bool) Option {
+	return func(b *Breaker) { b.healthyErr = fn }
 }
 
 // Breaker — выключатель одной зависимости. Нулевой указатель пропускает все вызовы.
 type Breaker struct {
-	name     string
-	cb       *gobreaker.CircuitBreaker[struct{}]
-	observer Observer
+	name       string
+	cb         *gobreaker.CircuitBreaker[struct{}]
+	observer   Observer
+	healthyErr func(error) bool
 }
 
 // New создаёт выключатель зависимости name. observer может быть nil.
-func New(name string, cfg config.Breaker, observer Observer) *Breaker {
+func New(name string, cfg config.Breaker, observer Observer, opts ...Option) *Breaker {
 	b := &Breaker{name: name, observer: observer}
+	for _, opt := range opts {
+		opt(b)
+	}
 
 	b.cb = gobreaker.NewCircuitBreaker[struct{}](gobreaker.Settings{
 		Name:        name,
@@ -58,19 +78,18 @@ func New(name string, cfg config.Breaker, observer Observer) *Breaker {
 		ReadyToTrip: func(c gobreaker.Counts) bool {
 			return c.ConsecutiveFailures >= cfg.FailureThreshold
 		},
-		OnStateChange: func(_ string, _, to gobreaker.State) {
-			b.notifyState(fromGobreaker(to))
-		},
 		IsExcluded:   isExcluded,
-		IsSuccessful: isSuccessful,
+		IsSuccessful: b.isSuccessful,
 	})
-
-	b.notifyState(StateClosed)
 
 	return b
 }
 
-// State возвращает текущее состояние выключателя.
+// Name возвращает имя зависимости.
+func (b *Breaker) Name() string { return b.name }
+
+// State возвращает текущее состояние выключателя. Вызов сам переводит
+// разомкнутый выключатель в полуоткрытый, когда истекла пауза, — даже без трафика.
 func (b *Breaker) State() State {
 	if b == nil {
 		return StateClosed
@@ -89,15 +108,23 @@ func (b *Breaker) Do(fn func() error) error {
 	_, err := b.cb.Execute(func() (struct{}, error) {
 		return struct{}{}, fn()
 	})
-	if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-		if b.observer != nil {
-			b.observer.BreakerRejected(b.name)
-		}
 
-		return fmt.Errorf("%s: %w: %w", b.name, domain.ErrUnavailable, err)
+	var reason string
+
+	switch {
+	case errors.Is(err, gobreaker.ErrOpenState):
+		reason = RejectOpen
+	case errors.Is(err, gobreaker.ErrTooManyRequests):
+		reason = RejectProbing
+	default:
+		return err
 	}
 
-	return err
+	if b.observer != nil {
+		b.observer.BreakerRejected(b.name, reason)
+	}
+
+	return fmt.Errorf("%s (%s): %w", b.name, reason, domain.ErrUnavailable)
 }
 
 // Call выполняет fn через выключатель и возвращает её результат.
@@ -114,19 +141,17 @@ func Call[T any](b *Breaker, fn func() (T, error)) (T, error) {
 	return result, err
 }
 
-func (b *Breaker) notifyState(s State) {
-	if b.observer != nil {
-		b.observer.BreakerStateChanged(b.name, s)
-	}
-}
-
 // isExcluded отбрасывает отказы, в которых зависимость не виновата: клиент ушёл, не дождавшись ответа.
 func isExcluded(err error) bool {
 	return errors.Is(err, context.Canceled)
 }
 
 // isSuccessful считает успехом ответы зависимости, означающие отказ по смыслу, а не сбой.
-func isSuccessful(err error) bool {
+func (b *Breaker) isSuccessful(err error) bool {
+	if b.healthyErr != nil && b.healthyErr(err) {
+		return true
+	}
+
 	return err == nil ||
 		errors.Is(err, domain.ErrAvatarNotFound) ||
 		errors.Is(err, domain.ErrObjectNotFound) ||

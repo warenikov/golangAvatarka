@@ -114,17 +114,18 @@ func run() error {
 		return fmt.Errorf("breaker metrics: %w", err)
 	}
 
-	storage = storage.WithBreaker(breaker.New("s3", cfg.Breaker, breakerMetrics))
+	storage = storage.WithBreaker(breakerMetrics.NewBreaker("s3", cfg.Breaker))
 
 	publisher, err := rabbitmq.NewPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: %w", err)
 	}
 	publisher = publisher.WithMetrics(metrics).
-		WithBreaker(breaker.New("rabbitmq", cfg.Breaker, breakerMetrics))
+		WithBreaker(breakerMetrics.NewBreaker("rabbitmq", cfg.Breaker))
 
 	repo := postgres.NewAvatarRepository(pool).
-		WithBreaker(breaker.New("postgres", cfg.Breaker, breakerMetrics))
+		WithBreaker(breakerMetrics.NewBreaker("postgres", cfg.Breaker,
+			breaker.WithHealthyErrors(postgres.IsDataError)))
 	processor := worker.NewProcessor(repo, storage, cfg.App.MaxImagePixels, log,
 		worker.WithMetrics(metrics))
 	reconciler := worker.NewReconciler(repo, publisher,

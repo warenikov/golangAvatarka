@@ -50,6 +50,7 @@ func serviceRouter(t *testing.T) (http.Handler, webDeps) {
 	cfg := &config.Config{}
 	cfg.App.MaxUploadBytes = testMaxUpload
 	cfg.App.AllowedMIME = []string{"image/jpeg", "image/png", "image/webp"}
+	cfg.Breaker.OpenTimeout = 30 * time.Second
 
 	h := NewHandler(services.NewAvatarService(d.repo, d.storage, d.publisher, log), cfg, log)
 
@@ -243,6 +244,7 @@ func TestGalleryDependencyUnavailable(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/web/gallery/"+webUserID, nil))
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
 	assert.Contains(t, rec.Body.String(), "временно недоступен")
 }
 
@@ -261,6 +263,7 @@ func TestUploadDependencyUnavailable(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
 	assert.Contains(t, rec.Body.String(), "временно недоступен")
 }
 

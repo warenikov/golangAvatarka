@@ -37,8 +37,10 @@ func (p *Publisher) WithMetrics(m *observability.Business) *Publisher {
 	return p
 }
 
-// WithBreaker пропускает публикации через выключатель: пока брокер недоступен,
+// WithBreaker пропускает публикации загрузок через выключатель: пока брокер недоступен,
 // событие не ждёт подтверждения, а сразу уходит в ошибку и достаётся реконсилятору.
+// Удаления идут в обход: их реконсилятор не переопубликует, и отклонённое
+// выключателем событие оставило бы файлы в хранилище навсегда.
 func (p *Publisher) WithBreaker(b *breaker.Breaker) *Publisher {
 	p.breaker = b
 
@@ -47,17 +49,19 @@ func (p *Publisher) WithBreaker(b *breaker.Breaker) *Publisher {
 
 // PublishUpload отправляет событие о загруженной аватарке.
 func (p *Publisher) PublishUpload(ctx context.Context, event domain.AvatarUploadEvent) error {
-	return p.publishTracked(ctx, RoutingUploaded, observability.EventUpload, event.AvatarID, event)
+	return p.publishTracked(ctx, p.breaker, RoutingUploaded, observability.EventUpload, event.AvatarID, event)
 }
 
 // PublishDelete отправляет событие об удалённой аватарке.
 func (p *Publisher) PublishDelete(ctx context.Context, event domain.AvatarDeleteEvent) error {
-	return p.publishTracked(ctx, RoutingDeleted, observability.EventDelete, event.AvatarID, event)
+	return p.publishTracked(ctx, nil, RoutingDeleted, observability.EventDelete, event.AvatarID, event)
 }
 
-// publishTracked публикует событие и учитывает результат в метриках.
-func (p *Publisher) publishTracked(ctx context.Context, routingKey, kind, messageID string, payload any) error {
-	err := p.breaker.Do(func() error { return p.publish(ctx, routingKey, messageID, payload) })
+// publishTracked публикует событие через выключатель b (nil — напрямую) и учитывает результат в метриках.
+func (p *Publisher) publishTracked(
+	ctx context.Context, b *breaker.Breaker, routingKey, kind, messageID string, payload any,
+) error {
+	err := b.Do(func() error { return p.publish(ctx, routingKey, messageID, payload) })
 
 	result := observability.ResultOK
 	if err != nil {

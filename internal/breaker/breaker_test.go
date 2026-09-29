@@ -20,22 +20,14 @@ var errDown = errors.New("connection refused")
 
 type recorder struct {
 	mu       sync.Mutex
-	states   []breaker.State
-	rejected int
+	rejected []string
 }
 
-func (r *recorder) BreakerStateChanged(_ string, state breaker.State) {
+func (r *recorder) BreakerRejected(_, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.states = append(r.states, state)
-}
-
-func (r *recorder) BreakerRejected(string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.rejected++
+	r.rejected = append(r.rejected, reason)
 }
 
 func testConfig(openTimeout time.Duration) config.Breaker {
@@ -80,8 +72,7 @@ func TestBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrUnavailable)
 	assert.Contains(t, err.Error(), "postgres")
 	assert.False(t, called, "разомкнутый выключатель не должен звать зависимость")
-	assert.Equal(t, []breaker.State{breaker.StateClosed, breaker.StateOpen}, rec.states)
-	assert.Equal(t, 1, rec.rejected)
+	assert.Equal(t, []string{breaker.RejectOpen}, rec.rejected)
 }
 
 func TestBreakerSuccessResetsFailureStreak(t *testing.T) {
@@ -127,8 +118,7 @@ func TestBreakerCountsDeadlineAsFailure(t *testing.T) {
 }
 
 func TestBreakerRecoversThroughHalfOpen(t *testing.T) {
-	rec := &recorder{}
-	b := breaker.New("s3", testConfig(20*time.Millisecond), rec)
+	b := breaker.New("s3", testConfig(20*time.Millisecond), nil)
 
 	fail(b, 3, errDown)
 	require.Equal(t, breaker.StateOpen, b.State())
@@ -140,9 +130,6 @@ func TestBreakerRecoversThroughHalfOpen(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", got)
 	assert.Equal(t, breaker.StateClosed, b.State())
-	assert.Equal(t,
-		[]breaker.State{breaker.StateClosed, breaker.StateOpen, breaker.StateHalfOpen, breaker.StateClosed},
-		rec.states)
 }
 
 func TestBreakerReopensOnHalfOpenFailure(t *testing.T) {
@@ -155,6 +142,48 @@ func TestBreakerReopensOnHalfOpenFailure(t *testing.T) {
 	fail(b, 1, errDown)
 
 	assert.Equal(t, breaker.StateOpen, b.State())
+}
+
+func TestBreakerRejectsExtraProbes(t *testing.T) {
+	rec := &recorder{}
+	b := breaker.New("s3", testConfig(20*time.Millisecond), rec)
+
+	fail(b, 3, errDown)
+	require.Eventually(t, func() bool { return b.State() == breaker.StateHalfOpen },
+		time.Second, 5*time.Millisecond)
+
+	probing := make(chan struct{})
+	release := make(chan struct{})
+
+	go func() {
+		_ = b.Do(func() error {
+			close(probing)
+			<-release
+
+			return nil
+		})
+	}()
+
+	<-probing
+
+	err := b.Do(func() error { return nil })
+	close(release)
+
+	require.ErrorIs(t, err, domain.ErrUnavailable)
+	assert.Contains(t, err.Error(), breaker.RejectProbing)
+	assert.Equal(t, []string{breaker.RejectProbing}, rec.rejected)
+}
+
+func TestBreakerHealthyErrorsDoNotTrip(t *testing.T) {
+	errBadData := errors.New("value too long")
+	b := breaker.New("postgres", testConfig(time.Minute), nil,
+		breaker.WithHealthyErrors(func(err error) bool { return errors.Is(err, errBadData) }))
+
+	fail(b, 10, errBadData)
+	assert.Equal(t, breaker.StateClosed, b.State(), "отказ по данным — ответ исправной базы")
+
+	fail(b, 3, errDown)
+	assert.Equal(t, breaker.StateOpen, b.State(), "настоящие сбои по-прежнему размыкают")
 }
 
 func TestStateString(t *testing.T) {

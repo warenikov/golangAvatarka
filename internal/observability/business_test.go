@@ -1,6 +1,7 @@
 package observability_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go-avatar-service/internal/breaker"
+	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/observability"
 )
 
@@ -169,8 +171,8 @@ func TestBreakerMetricsAreNilSafe(t *testing.T) {
 	var b *observability.Breakers
 
 	assert.NotPanics(t, func() {
-		b.BreakerStateChanged("postgres", breaker.StateOpen)
-		b.BreakerRejected("postgres")
+		b.BreakerRejected("postgres", breaker.RejectOpen)
+		require.NotNil(t, b.NewBreaker("postgres", config.Breaker{FailureThreshold: 1}))
 	})
 }
 
@@ -179,10 +181,28 @@ func TestBreakerMetrics(t *testing.T) {
 	b, err := observability.NewBreakers(reg)
 	require.NoError(t, err)
 
-	b.BreakerStateChanged("postgres", breaker.StateOpen)
-	b.BreakerStateChanged("s3", breaker.StateClosed)
-	b.BreakerRejected("postgres")
-	b.BreakerRejected("postgres")
+	cfg := config.Breaker{FailureThreshold: 1, OpenTimeout: 50 * time.Millisecond, HalfOpenRequests: 1}
+	pg := b.NewBreaker("postgres", cfg)
+	b.NewBreaker("s3", cfg)
+
+	_ = pg.Do(func() error { return errors.New("connection refused") })
+	_ = pg.Do(func() error { return nil })
+
+	values := gatherBreakers(t, reg)
+	assert.InDelta(t, 2, values["circuit_breaker_state/postgres"], 0)
+	assert.InDelta(t, 0, values["circuit_breaker_state/s3"], 0)
+	assert.InDelta(t, 1, values["circuit_breaker_rejected_total/postgres/open"], 0)
+
+	require.Eventually(t, func() bool {
+		return gatherBreakers(t, reg)["circuit_breaker_state/postgres"] == 1
+	}, time.Second, 10*time.Millisecond, "без трафика разомкнутый выключатель должен стать полуоткрытым в метрике")
+
+	_, err = observability.NewBreakers(reg)
+	require.Error(t, err, "повторная регистрация должна вернуть ошибку")
+}
+
+func gatherBreakers(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -190,7 +210,11 @@ func TestBreakerMetrics(t *testing.T) {
 	values := map[string]float64{}
 	for _, f := range families {
 		for _, m := range f.GetMetric() {
-			key := f.GetName() + "/" + m.GetLabel()[0].GetValue()
+			key := f.GetName()
+			for _, l := range m.GetLabel() {
+				key += "/" + l.GetValue()
+			}
+
 			if f.GetType() == dto.MetricType_GAUGE {
 				values[key] = m.GetGauge().GetValue()
 			} else {
@@ -199,10 +223,5 @@ func TestBreakerMetrics(t *testing.T) {
 		}
 	}
 
-	assert.InDelta(t, 2, values["circuit_breaker_state/postgres"], 0)
-	assert.InDelta(t, 0, values["circuit_breaker_state/s3"], 0)
-	assert.InDelta(t, 2, values["circuit_breaker_rejected_total/postgres"], 0)
-
-	_, err = observability.NewBreakers(reg)
-	require.Error(t, err, "повторная регистрация должна вернуть ошибку")
+	return values
 }

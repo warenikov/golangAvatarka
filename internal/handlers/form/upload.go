@@ -12,6 +12,9 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"go-avatar-service/internal/services/imageproc"
 )
@@ -22,6 +25,9 @@ const (
 	FieldFile  = "file"
 	FieldImage = "image"
 )
+
+// maxFileNameRunes совпадает с размером колонки file_name в базе.
+const maxFileNameRunes = 255
 
 // Image — загруженное изображение с уже определённым форматом.
 // Close обязателен к вызову.
@@ -75,7 +81,7 @@ func ReadImage(r *http.Request, allowedMIME []string) (*Image, error) {
 	}
 
 	return &Image{
-		Name: header.Filename,
+		Name: cleanFileName(header.Filename),
 		Size: header.Size,
 		MIME: mime,
 		Body: body,
@@ -105,4 +111,23 @@ func openUploadedFile(r *http.Request) (multipart.File, *multipart.FileHeader, e
 
 func isMissingFile(err error) bool {
 	return errors.Is(err, http.ErrMissingFile)
+}
+
+// cleanFileName приводит имя файла от клиента к виду, который база примет всегда:
+// валидный UTF-8 без управляющих символов и не длиннее колонки.
+func cleanFileName(name string) string {
+	name = strings.ToValidUTF8(name, string(utf8.RuneError))
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+
+		return r
+	}, name)
+
+	if utf8.RuneCountInString(name) > maxFileNameRunes {
+		name = string([]rune(name)[:maxFileNameRunes])
+	}
+
+	return name
 }
