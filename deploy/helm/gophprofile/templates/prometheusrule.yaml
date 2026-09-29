@@ -63,6 +63,20 @@ spec:
             summary: {{ `"Под {{ $labels.pod }} перезапускается"` }}
             description: {{ `"{{ $value }} перезапусков за 15 минут. Смотреть kubectl logs --previous."` }}
 
+        # Разомкнутый выключатель — это уже отказ для пользователя: запросы
+        # к зависимости отклоняются 503. Минута отсекает единичные вспышки,
+        # которые выключатель сам пережил через пробные запросы.
+        - alert: GophProfileCircuitOpen
+          expr: >-
+            max by (component, dependency) (
+              circuit_breaker_state{namespace="{{ .Release.Namespace }}"}) == 2
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: {{ `"{{ $labels.component }}: разомкнут выключатель {{ $labels.dependency }}"` }}
+            description: {{ `"Обращения к {{ $labels.dependency }} отклоняются дольше минуты: зависимость недоступна или отвечает ошибками."` }}
+
     - name: gophprofile-processing
       rules:
         # Отставание важнее скорости: пользователь видит оригинал вместо

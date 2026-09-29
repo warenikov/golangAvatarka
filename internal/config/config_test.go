@@ -41,6 +41,9 @@ func validConfig() *config.Config {
 	cfg.RabbitMQ.RetryTTL = 30 * time.Second
 	cfg.RabbitMQ.MaxRetries = 5
 	cfg.RabbitMQ.Prefetch = 4
+	cfg.Breaker.FailureThreshold = 5
+	cfg.Breaker.OpenTimeout = 30 * time.Second
+	cfg.Breaker.HalfOpenRequests = 3
 
 	return cfg
 }
@@ -53,7 +56,7 @@ func validConfig() *config.Config {
 func isolateEnv(t *testing.T) {
 	t.Helper()
 
-	prefixes := []string{"APP_", "DB_", "S3_", "RABBITMQ_", "WORKER_"}
+	prefixes := []string{"APP_", "DB_", "S3_", "RABBITMQ_", "WORKER_", "BREAKER_"}
 
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
@@ -93,6 +96,9 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "avatars", cfg.S3.Bucket)
 	assert.Equal(t, 30*time.Second, cfg.RabbitMQ.RetryTTL)
 	assert.Equal(t, time.Minute, cfg.Worker.ReconcileInterval)
+	assert.Equal(t, uint32(5), cfg.Breaker.FailureThreshold)
+	assert.Equal(t, 30*time.Second, cfg.Breaker.OpenTimeout)
+	assert.Equal(t, uint32(3), cfg.Breaker.HalfOpenRequests)
 	assert.False(t, cfg.IsProd())
 }
 
@@ -225,6 +231,10 @@ func TestValidate(t *testing.T) {
 		{"слишком длинный TTL", func(c *config.Config) { c.RabbitMQ.RetryTTL = 48 * time.Hour }, "RABBITMQ_RETRY_TTL"},
 		{"нет ретраев", func(c *config.Config) { c.RabbitMQ.MaxRetries = 0 }, "RABBITMQ_MAX_RETRIES"},
 		{"нулевой prefetch", func(c *config.Config) { c.RabbitMQ.Prefetch = 0 }, "RABBITMQ_PREFETCH"},
+		{"нулевой порог выключателя", func(c *config.Config) { c.Breaker.FailureThreshold = 0 }, "BREAKER_FAILURE_THRESHOLD"},
+		{"короткая пауза выключателя", func(c *config.Config) { c.Breaker.OpenTimeout = 0 }, "BREAKER_OPEN_TIMEOUT"},
+		{"долгая пауза выключателя", func(c *config.Config) { c.Breaker.OpenTimeout = time.Hour }, "BREAKER_OPEN_TIMEOUT"},
+		{"нет пробных запросов", func(c *config.Config) { c.Breaker.HalfOpenRequests = 0 }, "BREAKER_HALF_OPEN_REQUESTS"},
 	}
 
 	for _, tt := range tests {

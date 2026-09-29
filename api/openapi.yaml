@@ -93,6 +93,8 @@ paths:
                 $ref: '#/components/schemas/TooLargeError'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -134,6 +136,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
     delete:
       tags: [avatars]
       summary: Удалить аватарку
@@ -156,6 +160,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /api/v1/avatars/{avatar_id}/metadata:
     get:
@@ -177,6 +183,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /api/v1/users/{user_id}/avatar:
     get:
@@ -230,6 +238,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
     delete:
       tags: [users]
       summary: Удалить текущую аватарку пользователя
@@ -248,6 +258,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /api/v1/users/{user_id}/avatars:
     get:
@@ -268,6 +280,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /health:
     get:
@@ -523,6 +537,23 @@ components:
           example:
             error: Too many requests
             details: Limit is 300 requests per minute
+
+    Unavailable:
+      description: |
+        Хранилище, база или брокер недоступны, и автоматический выключатель
+        отклоняет обращения к ним, не дожидаясь таймаута. Запрос стоит повторить
+        через указанное в `Retry-After` время.
+      headers:
+        Retry-After:
+          description: Через сколько секунд повторять
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Service temporarily unavailable
 
     InternalError:
       description: Внутренняя ошибка

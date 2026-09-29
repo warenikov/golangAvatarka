@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/observability"
 )
 
@@ -162,4 +163,46 @@ func gather(t *testing.T, reg *prometheus.Registry) []*dto.MetricFamily {
 	require.NoError(t, err)
 
 	return families
+}
+
+func TestBreakerMetricsAreNilSafe(t *testing.T) {
+	var b *observability.Breakers
+
+	assert.NotPanics(t, func() {
+		b.BreakerStateChanged("postgres", breaker.StateOpen)
+		b.BreakerRejected("postgres")
+	})
+}
+
+func TestBreakerMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	b, err := observability.NewBreakers(reg)
+	require.NoError(t, err)
+
+	b.BreakerStateChanged("postgres", breaker.StateOpen)
+	b.BreakerStateChanged("s3", breaker.StateClosed)
+	b.BreakerRejected("postgres")
+	b.BreakerRejected("postgres")
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	values := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			key := f.GetName() + "/" + m.GetLabel()[0].GetValue()
+			if f.GetType() == dto.MetricType_GAUGE {
+				values[key] = m.GetGauge().GetValue()
+			} else {
+				values[key] = m.GetCounter().GetValue()
+			}
+		}
+	}
+
+	assert.InDelta(t, 2, values["circuit_breaker_state/postgres"], 0)
+	assert.InDelta(t, 0, values["circuit_breaker_state/s3"], 0)
+	assert.InDelta(t, 2, values["circuit_breaker_rejected_total/postgres"], 0)
+
+	_, err = observability.NewBreakers(reg)
+	require.Error(t, err, "повторная регистрация должна вернуть ошибку")
 }

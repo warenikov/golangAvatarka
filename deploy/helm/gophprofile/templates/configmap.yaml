@@ -59,6 +59,10 @@ data:
   WORKER_RECONCILE_INTERVAL: {{ .Values.worker.reconcileInterval | quote }}
   WORKER_RECONCILE_AGE: {{ .Values.worker.reconcileAge | quote }}
 
+  BREAKER_FAILURE_THRESHOLD: {{ .Values.app.breaker.failureThreshold | int64 | quote }}
+  BREAKER_OPEN_TIMEOUT: {{ .Values.app.breaker.openTimeout | quote }}
+  BREAKER_HALF_OPEN_REQUESTS: {{ .Values.app.breaker.halfOpenRequests | int64 | quote }}
+
   TRACING_ENABLED: {{ .Values.tracing.enabled | quote }}
   TRACING_ENDPOINT: {{ .Values.tracing.endpoint | quote }}
   TRACING_SAMPLE_RATIO: {{ .Values.tracing.sampleRatio | quote }}

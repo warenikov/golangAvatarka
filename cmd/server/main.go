@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
@@ -143,9 +144,17 @@ func run() error {
 		return fmt.Errorf("http metrics: %w", err)
 	}
 
-	publisher = publisher.WithMetrics(businessMetrics)
+	breakerMetrics, err := observability.NewBreakers(registry)
+	if err != nil {
+		return fmt.Errorf("breaker metrics: %w", err)
+	}
 
-	repo := postgres.NewAvatarRepository(pool)
+	storage = storage.WithBreaker(breaker.New("s3", cfg.Breaker, breakerMetrics))
+	publisher = publisher.WithMetrics(businessMetrics).
+		WithBreaker(breaker.New("rabbitmq", cfg.Breaker, breakerMetrics))
+
+	repo := postgres.NewAvatarRepository(pool).
+		WithBreaker(breaker.New("postgres", cfg.Breaker, breakerMetrics))
 	avatarSvc := services.NewAvatarService(repo, storage, publisher, log,
 		services.WithMetrics(businessMetrics))
 

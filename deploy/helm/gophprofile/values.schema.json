@@ -47,6 +47,15 @@
         "trustedProxyCIDRs": {
           "description": "Список подсетей через запятую. Пусто — адрес клиента берётся из соединения.",
           "type": "string"
+        },
+        "breaker": {
+          "description": "Автоматические выключатели внешних зависимостей.",
+          "type": "object",
+          "properties": {
+            "failureThreshold": { "type": "integer", "minimum": 1 },
+            "openTimeout": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
+            "halfOpenRequests": { "type": "integer", "minimum": 1 }
+          }
         }
       }
     },

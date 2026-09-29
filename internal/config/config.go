@@ -29,6 +29,8 @@ const (
 	// Предел паузы слива: дольше неё под всё равно добьёт
 	// terminationGracePeriodSeconds, и остановка станет не мягкой, а грубой.
 	maxDrainDelay = 2 * time.Minute
+
+	maxBreakerOpenTimeout = 10 * time.Minute
 )
 
 type Config struct {
@@ -38,6 +40,7 @@ type Config struct {
 	RabbitMQ RabbitMQ
 	Worker   Worker
 	Tracing  Tracing
+	Breaker  Breaker
 }
 
 type App struct {
@@ -117,6 +120,13 @@ type Worker struct {
 	ReconcileAge      time.Duration `env:"WORKER_RECONCILE_AGE" envDefault:"5m"`
 	// Служебный адрес воркера: /metrics и /health. Наружу не публикуется.
 	AdminAddr string `env:"WORKER_ADMIN_ADDR" envDefault:":8081"`
+}
+
+// Breaker — настройки выключателей внешних зависимостей: Postgres, S3 и брокера.
+type Breaker struct {
+	FailureThreshold uint32        `env:"BREAKER_FAILURE_THRESHOLD" envDefault:"5"`
+	OpenTimeout      time.Duration `env:"BREAKER_OPEN_TIMEOUT" envDefault:"30s"`
+	HalfOpenRequests uint32        `env:"BREAKER_HALF_OPEN_REQUESTS" envDefault:"3"`
 }
 
 // Load читает файл .env, если он существует, разбирает переменные окружения и проверяет значения.
@@ -225,6 +235,16 @@ func (c *Config) Validate() error {
 	}
 	if c.RabbitMQ.Prefetch < 1 {
 		errs = append(errs, fmt.Errorf("RABBITMQ_PREFETCH: ожидается положительное число, получено %d", c.RabbitMQ.Prefetch))
+	}
+	if c.Breaker.FailureThreshold < 1 {
+		errs = append(errs, errors.New("BREAKER_FAILURE_THRESHOLD: ожидается положительное число"))
+	}
+	if c.Breaker.OpenTimeout < time.Second || c.Breaker.OpenTimeout > maxBreakerOpenTimeout {
+		errs = append(errs, fmt.Errorf("BREAKER_OPEN_TIMEOUT: ожидается от 1s до %s, получено %s",
+			maxBreakerOpenTimeout, c.Breaker.OpenTimeout))
+	}
+	if c.Breaker.HalfOpenRequests < 1 {
+		errs = append(errs, errors.New("BREAKER_HALF_OPEN_REQUESTS: ожидается положительное число"))
 	}
 
 	if c.App.Env == EnvProd {

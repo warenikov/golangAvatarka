@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -230,6 +231,37 @@ func TestGalleryRepositoryFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Не удалось загрузить галерею")
+}
+
+func TestGalleryDependencyUnavailable(t *testing.T) {
+	router, d := serviceRouter(t)
+
+	d.repo.EXPECT().ListByUserID(mock.Anything, webUserID).
+		Return(nil, fmt.Errorf("postgres: %w", domain.ErrUnavailable)).Once()
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/web/gallery/"+webUserID, nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "временно недоступен")
+}
+
+func TestUploadDependencyUnavailable(t *testing.T) {
+	router, d := serviceRouter(t)
+
+	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(fmt.Errorf("s3: %w", domain.ErrUnavailable)).Once()
+
+	contentType, body := multipartUpload(t, webUserID, form.FieldFile, "avatar.png", webPNG(t))
+
+	req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
+	req.Header.Set("Content-Type", contentType)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "временно недоступен")
 }
 
 func TestDeleteFromGallery(t *testing.T) {

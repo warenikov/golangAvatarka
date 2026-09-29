@@ -48,6 +48,13 @@ app:
   # контроллера. Это обеспечивает networkPolicy ниже. Значение по умолчанию —
   # диапазон подов k3s и OrbStack; на другом кластере смотреть podCIDR.
   trustedProxyCIDRs: "10.42.0.0/16"
+  # Выключатели Postgres, S3 и брокера. После failureThreshold отказов подряд
+  # обращения к зависимости openTimeout отклоняются сразу с 503, затем
+  # halfOpenRequests пробных запросов решают, вернуть ли трафик.
+  breaker:
+    failureThreshold: 5
+    openTimeout: 30s
+    halfOpenRequests: 3
 
 server:
   replicaCount: 3

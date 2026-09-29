@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
@@ -108,13 +109,22 @@ func run() error {
 		return fmt.Errorf("business metrics: %w", err)
 	}
 
+	breakerMetrics, err := observability.NewBreakers(registry)
+	if err != nil {
+		return fmt.Errorf("breaker metrics: %w", err)
+	}
+
+	storage = storage.WithBreaker(breaker.New("s3", cfg.Breaker, breakerMetrics))
+
 	publisher, err := rabbitmq.NewPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: %w", err)
 	}
-	publisher = publisher.WithMetrics(metrics)
+	publisher = publisher.WithMetrics(metrics).
+		WithBreaker(breaker.New("rabbitmq", cfg.Breaker, breakerMetrics))
 
-	repo := postgres.NewAvatarRepository(pool)
+	repo := postgres.NewAvatarRepository(pool).
+		WithBreaker(breaker.New("postgres", cfg.Breaker, breakerMetrics))
 	processor := worker.NewProcessor(repo, storage, cfg.App.MaxImagePixels, log,
 		worker.WithMetrics(metrics))
 	reconciler := worker.NewReconciler(repo, publisher,

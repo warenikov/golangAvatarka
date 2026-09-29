@@ -32,7 +32,7 @@ spec:
         app.kubernetes.io/instance: gp
         app.kubernetes.io/component: worker
       annotations:
-        checksum/config: a7e8153791f9a9b356f27ffddc90da643564c486275fb2080d55dadb94a83814
+        checksum/config: 8eb167f58f5318521a02f49fcbf6e4a4b6de0399553b7709dce8f7fdff021883
         checksum/secret: be412f70df45471ec28927db94a44f16e6190ec37e050d42aba89c628410dfc9
     spec:
       serviceAccountName: gp-gophprofile

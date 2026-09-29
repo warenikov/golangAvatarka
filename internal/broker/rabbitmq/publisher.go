@@ -9,6 +9,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/observability"
 )
@@ -16,6 +17,7 @@ import (
 type Publisher struct {
 	conn    *Connection
 	metrics *observability.Business
+	breaker *breaker.Breaker
 	mu      sync.Mutex
 }
 
@@ -35,6 +37,14 @@ func (p *Publisher) WithMetrics(m *observability.Business) *Publisher {
 	return p
 }
 
+// WithBreaker пропускает публикации через выключатель: пока брокер недоступен,
+// событие не ждёт подтверждения, а сразу уходит в ошибку и достаётся реконсилятору.
+func (p *Publisher) WithBreaker(b *breaker.Breaker) *Publisher {
+	p.breaker = b
+
+	return p
+}
+
 // PublishUpload отправляет событие о загруженной аватарке.
 func (p *Publisher) PublishUpload(ctx context.Context, event domain.AvatarUploadEvent) error {
 	return p.publishTracked(ctx, RoutingUploaded, observability.EventUpload, event.AvatarID, event)
@@ -47,7 +57,7 @@ func (p *Publisher) PublishDelete(ctx context.Context, event domain.AvatarDelete
 
 // publishTracked публикует событие и учитывает результат в метриках.
 func (p *Publisher) publishTracked(ctx context.Context, routingKey, kind, messageID string, payload any) error {
-	err := p.publish(ctx, routingKey, messageID, payload)
+	err := p.breaker.Do(func() error { return p.publish(ctx, routingKey, messageID, payload) })
 
 	result := observability.ResultOK
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/observability"
@@ -23,8 +24,9 @@ const codeNoSuchKey = "NoSuchKey"
 var _ domain.ObjectStorage = (*Storage)(nil)
 
 type Storage struct {
-	client *minio.Client
-	bucket string
+	client  *minio.Client
+	bucket  string
+	breaker *breaker.Breaker
 }
 
 // NewStorage подключается к хранилищу и создаёт бакет, если его ещё нет.
@@ -67,8 +69,7 @@ func (s *Storage) ensureBucket(ctx context.Context, region string) error {
 	return nil
 }
 
-// Put загружает объект в хранилище потоком, не читая его целиком в память.
-func (s *Storage) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) (err error) {
+func (s *Storage) put(ctx context.Context, key string, r io.Reader, size int64, contentType string) (err error) {
 	ctx, span := s.startSpan(ctx, "s3.put", key)
 	defer func() { observability.EndSpan(span, err) }()
 
@@ -91,8 +92,7 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader, size int64, 
 	return nil
 }
 
-// Get возвращает объект из хранилища. Вызывающий обязан закрыть Body.
-func (s *Storage) Get(ctx context.Context, key string) (_ *domain.Object, err error) {
+func (s *Storage) get(ctx context.Context, key string) (_ *domain.Object, err error) {
 	ctx, span := s.startSpan(ctx, "s3.get", key)
 	// Спан закрывается здесь, хотя тело объекта читают позже: замерять чтение
 	// клиентом было бы неверно — это уже не время хранилища.
@@ -128,8 +128,7 @@ func (s *Storage) Get(ctx context.Context, key string) (_ *domain.Object, err er
 	}, nil
 }
 
-// Delete удаляет объект. Удаление отсутствующего объекта считается успехом.
-func (s *Storage) Delete(ctx context.Context, key string) (err error) {
+func (s *Storage) delete(ctx context.Context, key string) (err error) {
 	ctx, span := s.startSpan(ctx, "s3.delete", key)
 	defer func() { observability.EndSpan(span, err) }()
 
@@ -148,8 +147,7 @@ func (s *Storage) Delete(ctx context.Context, key string) (err error) {
 	return nil
 }
 
-// DeleteMany удаляет набор объектов одним пакетом.
-func (s *Storage) DeleteMany(ctx context.Context, keys []string) (err error) {
+func (s *Storage) deleteMany(ctx context.Context, keys []string) (err error) {
 	ctx, span := observability.Tracer().Start(ctx, "s3.delete_many")
 	defer func() { observability.EndSpan(span, err) }()
 
