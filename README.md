@@ -50,6 +50,9 @@ make up-obs     # приложение вместе со стеком наблю
 размеры файлов, длительность построения миниатюр, отставание очереди обработки,
 события, ушедшие в очередь разбора.
 
+В Kubernetes то же самое делает kube-prometheus-stack: как собираются метрики,
+какие есть дашборды и алерты — в разделе [Мониторинг](#мониторинг).
+
 Стек вынесен в профиль `obs` — обычная разработка (`make up`) его не поднимает
 и не платит за него памятью.
 
@@ -252,6 +255,92 @@ curl -s -H "Host: avatars.local" -H "X-User-ID: user-1" \
 ```bash
 kubectl -n gophprofile port-forward svc/gp-gophprofile-server 8081:8081
 curl -s localhost:8081/readyz
+```
+
+### Мониторинг
+
+Метрики снимает Prometheus из kube-prometheus-stack. Статических целей нет:
+чарт создаёт по `ServiceMonitor` на сервер и воркер, и оператор сам следит
+за endpoints — новые реплики HPA попадают в сбор без перезапуска Prometheus.
+
+- метрики берутся со служебного порта `8081` (`/metrics`), публичный `8080` для этого не используется;
+- к каждой серии добавляются метки `pod` и `component` (`server` или `worker`):
+  по ним видно отдельную реплику, а не одну кривую на весь сервис;
+- интервал сбора — `monitoring.serviceMonitor.interval` в values, по умолчанию 30 секунд;
+- состояние кластера — поды, реплики, HPA, рестарты, лимиты — приходит
+  из kube-state-metrics, который ставится вместе со стеком.
+
+```bash
+# Grafana: логин admin, пароль — из секрета стека
+kubectl -n monitoring get secret kube-prometheus-stack-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d; echo
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+
+# Prometheus: цели, правила и сработавшие алерты
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+```
+
+В Prometheus на странице Status → Targets должны быть цели
+`gp-gophprofile-server` и `gp-gophprofile-worker` в состоянии `UP`.
+
+#### Дашборды
+
+Чарт кладёт их в ConfigMap с меткой `grafana_dashboard: "1"`, а сайдкар Grafana
+подгружает их сам — импортировать вручную ничего не нужно. Оба дашборда
+находятся поиском по тегу `gophprofile`.
+
+| Дашборд | Что показывает |
+|---|---|
+| **GophProfile — кластер** | поды по фазам и готовности; реплики Deployment и StatefulSet; текущие и желаемые реплики HPA на фоне его границ; рестарты; CPU относительно requests и память относительно лимитов по каждому поду; горутины; запросы по репликам сервера и их доля; состояние выключателей зависимостей |
+| **GophProfile — обзор** | загрузки и отказы, размеры файлов, длительность и результаты обработки, отставание очереди, публикация событий и очередь разбора, HTTP-запросы, доля 5xx и задержка по маршрутам |
+
+CPU и память сервера и воркера на дашборде кластера берутся из метрик
+самого процесса (`process_cpu_seconds_total`, `process_resident_memory_bytes`),
+а не из cAdvisor. Для контейнера с одним процессом на Go числа те же,
+а дашборд работает и там, где kubelet не отдаёт контейнерные метрики,
+как в OrbStack. CPU сравнивается с requests: лимита CPU в чарте нет намеренно,
+а HPA считает загрузку именно от requests.
+
+#### Алерты
+
+Правила приезжают объектом `PrometheusRule` и отбирают метрики только
+своего неймспейса. Сработавшие алерты уходят в Alertmanager стека.
+
+| Алерт | Условие | Ждёт | Важность | Что проверить |
+|---|---|---|---|---|
+| `GophProfileTargetDown` | Prometheus не может снять метрики с пода сервера или воркера | 2 мин | critical | `kubectl -n gophprofile get pods`, события пода, пробы |
+| `GophProfileHighErrorRate` | больше 5% ответов — 5xx | 5 мин | critical | логи сервера, `/readyz`, дашборд обзора |
+| `GophProfilePodRestarting` | больше двух рестартов контейнера за 15 минут | 5 мин | warning | `kubectl logs --previous`, причина завершения (OOMKilled — поднять лимит памяти) |
+| `GophProfileCircuitOpen` | выключатель зависимости разомкнут | 1 мин | critical | доступность Postgres, MinIO или RabbitMQ — какой именно, видно в метке `dependency` |
+| `GophProfileProcessingBacklog` | больше 10 аватарок ждут обработки дольше допустимого | 5 мин | warning | жив ли воркер, есть ли соединение с брокером |
+| `GophProfileEventsDeadLettered` | событие исчерпало попытки и ушло в очередь разбора | сразу | critical | очередь `avatars.dead` в RabbitMQ, логи воркера |
+| `GophProfileUploadFailureRate` | больше 10% загрузок завершаются ошибкой | 5 мин | warning | хранилище и база, выключатели |
+| `GophProfileProcessingTooSlow` | p95 построения миниатюр дольше 5 секунд | 10 мин | warning | CPU воркера относительно requests, размер входящих файлов |
+| `GophProfileAutoscalerAtMax` | HPA сервера упёрся в максимум реплик | 15 мин | warning | запаса на следующий всплеск нет: поднять `maxReplicas` или requests |
+
+#### Проверка балансировки
+
+Ingress-контроллер раскладывает запросы по всем готовым репликам сервера.
+Проверить можно на трёх репликах:
+
+```bash
+kubectl -n gophprofile patch hpa gp-gophprofile-server --type=merge -p '{"spec":{"minReplicas":3}}'
+
+for i in $(seq 1 240); do
+  curl -s -o /dev/null -H "Host: avatars.local" "http://$IP/api/v1/users/u$((i % 7))/avatar"
+  sleep 0.25
+done
+
+# вернуть значение из values: helm upgrade ручную правку не откатывает
+kubectl -n gophprofile patch hpa gp-gophprofile-server --type=merge -p '{"spec":{"minReplicas":1}}'
+```
+
+Панель «Запросы по репликам сервера» на дашборде кластера показывает
+почти одинаковые линии. На локальном стенде 240 запросов разошлись
+по 1,23–1,27 запроса в секунду на под. То же видно в Prometheus напрямую:
+
+```promql
+sum by (pod) (rate(http_requests_total{namespace="gophprofile", component="server"}[1m]))
 ```
 
 ### Окружения
