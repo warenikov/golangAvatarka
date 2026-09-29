@@ -363,7 +363,8 @@ postgresql:
 
 minio:
   enabled: false
-  image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+  # Сборка MinIO от сообщества: официальные образы больше не раздаются анонимно.
+  image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
   storage:
     size: 5Gi
   resources:

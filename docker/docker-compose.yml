@@ -18,9 +18,9 @@ services:
       retries: 10
 
   minio:
-    # quay.io, а не Docker Hub: тот же тег, но без анонимных лимитов,
-    # из-за которых CI падал на загрузке образа.
-    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    # Сборка MinIO от сообщества: официальные образы больше не раздаются
+    # анонимно. Бинарь, команда запуска и переменные те же.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}

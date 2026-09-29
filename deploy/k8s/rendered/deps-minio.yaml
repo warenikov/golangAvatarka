@@ -71,7 +71,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+          image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
           args: ["server", "/data", "--console-address", ":9001"]
           securityContext:
             allowPrivilegeEscalation: false
