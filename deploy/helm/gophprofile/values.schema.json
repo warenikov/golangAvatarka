@@ -177,7 +177,12 @@
         "exchange": { "type": "string", "minLength": 1 },
         "retryTTL": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
         "maxRetries": { "type": "integer", "minimum": 1 },
-        "prefetch": { "type": "integer", "minimum": 1 }
+        "prefetch": { "type": "integer", "minimum": 1 },
+        "memoryHighWatermark": {
+          "description": "Абсолютный порог памяти брокера. Должен быть ниже лимита контейнера.",
+          "type": "string",
+          "pattern": "^[0-9]+(KiB|MiB|GiB|kB|MB|GB)$"
+        }
       }
     },
 

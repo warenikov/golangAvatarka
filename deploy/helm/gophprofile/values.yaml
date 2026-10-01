@@ -335,7 +335,10 @@ rabbitmq:
       cpu: 50m
       memory: 256Mi
     limits:
-      memory: 512Mi
+      memory: 768Mi
+  # Порог, после которого брокер блокирует издателей. Держится около 0.6
+  # от лимита: сборщик мусора Erlang кратковременно берёт сверх порога.
+  memoryHighWatermark: 460MiB
   exchange: avatars.exchange
   queues:
     process: avatars.process

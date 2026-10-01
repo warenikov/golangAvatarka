@@ -2,7 +2,31 @@
 # Source: gophprofile/templates/deps-rabbitmq.yaml
 # RabbitMQ для локального кластера. Один узел, без кластеризации и зеркал:
 # топологию очередей — exchange, retry через DLX, dead-letter — заводит сам
-# сервис при подключении, поэтому донастраивать брокер здесь нечем.
+# сервис при подключении. Донастраивается только порог памяти.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gp-gophprofile-rabbitmq
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: rabbitmq
+data:
+  # Лимит контейнера брокер не видит: порог по умолчанию — 0.6 от памяти
+  # узла, на стенде это 10 ГБ при лимите пода в сотни мегабайт. До аларма,
+  # который притормозил бы публикацию, дело не доходило — процесс убивал
+  # OOM killer. Абсолютный порог ниже лимита превращает нехватку памяти
+  # в блокировку издателей вместо падения брокера.
+  20-memory.conf: |
+    vm_memory_high_watermark.absolute = 460MiB
+
+---
+# Source: gophprofile/templates/deps-rabbitmq.yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -59,6 +83,8 @@ spec:
         app.kubernetes.io/name: gophprofile
         app.kubernetes.io/instance: gp
         app.kubernetes.io/component: rabbitmq
+      annotations:
+        checksum/memory: f440fc2071b93118028080eca291cf4b77e2979403f00b0f705bb72bba2ec53e
     spec:
       # Зависимости в API-сервер не ходят так же, как и приложение.
       # Смонтированный токен здесь был бы просто лишней точкой опоры.
@@ -156,13 +182,23 @@ spec:
             timeoutSeconds: 15
           resources:
             limits:
-              memory: 512Mi
+              memory: 768Mi
             requests:
               cpu: 50m
               memory: 256Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/rabbitmq
+            # Один файл через subPath: каталог целиком перекрыл бы
+            # 10-defaults.conf из образа.
+            - name: config
+              mountPath: /etc/rabbitmq/conf.d/20-memory.conf
+              subPath: 20-memory.conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: gp-gophprofile-rabbitmq
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -1,7 +1,23 @@
 {{- if .Values.rabbitmq.enabled }}
 # RabbitMQ для локального кластера. Один узел, без кластеризации и зеркал:
 # топологию очередей — exchange, retry через DLX, dead-letter — заводит сам
-# сервис при подключении, поэтому донастраивать брокер здесь нечем.
+# сервис при подключении. Донастраивается только порог памяти.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+data:
+  # Лимит контейнера брокер не видит: порог по умолчанию — 0.6 от памяти
+  # узла, на стенде это 10 ГБ при лимите пода в сотни мегабайт. До аларма,
+  # который притормозил бы публикацию, дело не доходило — процесс убивал
+  # OOM killer. Абсолютный порог ниже лимита превращает нехватку памяти
+  # в блокировку издателей вместо падения брокера.
+  20-memory.conf: |
+    vm_memory_high_watermark.absolute = {{ .Values.rabbitmq.memoryHighWatermark }}
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -38,6 +54,8 @@ spec:
     metadata:
       labels:
         {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "rabbitmq") | nindent 8 }}
+      annotations:
+        checksum/memory: {{ .Values.rabbitmq.memoryHighWatermark | sha256sum }}
     spec:
       # Зависимости в API-сервер не ходят так же, как и приложение.
       # Смонтированный токен здесь был бы просто лишней точкой опоры.
@@ -138,6 +156,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/rabbitmq
+            # Один файл через subPath: каталог целиком перекрыл бы
+            # 10-defaults.conf из образа.
+            - name: config
+              mountPath: /etc/rabbitmq/conf.d/20-memory.conf
+              subPath: 20-memory.conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "gophprofile.fullname" . }}-rabbitmq
   volumeClaimTemplates:
     - metadata:
         name: data
