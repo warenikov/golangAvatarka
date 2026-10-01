@@ -23,8 +23,8 @@ type Publisher struct {
 
 // NewPublisher включает подтверждения публикации и возвращает публикатор событий.
 func NewPublisher(conn *Connection) (*Publisher, error) {
-	if err := conn.channel.Confirm(false); err != nil {
-		return nil, fmt.Errorf("enable publisher confirms: %w", err)
+	if err := conn.enableConfirms(); err != nil {
+		return nil, err
 	}
 
 	return &Publisher{conn: conn}, nil
@@ -87,7 +87,7 @@ func (p *Publisher) publish(ctx context.Context, routingKey, messageID string, p
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	confirm, err := p.conn.channel.PublishWithDeferredConfirmWithContext(ctx,
+	confirm, err := p.conn.publishChannel().PublishWithDeferredConfirmWithContext(ctx,
 		p.conn.topology.exchange, routingKey, false, false,
 		amqp.Publishing{
 			ContentType:  "application/json",
@@ -101,6 +101,9 @@ func (p *Publisher) publish(ctx context.Context, routingKey, messageID string, p
 		})
 	if err != nil {
 		return fmt.Errorf("publish %s: %w", routingKey, err)
+	}
+	if confirm == nil {
+		return fmt.Errorf("publish %s: канал не в режиме подтверждений", routingKey)
 	}
 
 	confirmCtx, cancel := context.WithTimeout(ctx, publishConfirmTTL)
