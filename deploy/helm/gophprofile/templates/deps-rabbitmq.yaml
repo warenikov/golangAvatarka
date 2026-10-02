@@ -1,0 +1,177 @@
+{{- if .Values.rabbitmq.enabled }}
+# RabbitMQ для локального кластера. Один узел, без кластеризации и зеркал:
+# топологию очередей — exchange, retry через DLX, dead-letter — заводит сам
+# сервис при подключении. Донастраивается только порог памяти.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+data:
+  # Лимит контейнера брокер не видит: порог по умолчанию — 0.6 от памяти
+  # узла, на стенде это 10 ГБ при лимите пода в сотни мегабайт. До аларма,
+  # который притормозил бы публикацию, дело не доходило — процесс убивал
+  # OOM killer. Абсолютный порог ниже лимита превращает нехватку памяти
+  # в блокировку издателей вместо падения брокера.
+  20-memory.conf: |
+    vm_memory_high_watermark.absolute = {{ .Values.rabbitmq.memoryHighWatermark }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp
+    - name: management
+      port: 15672
+      targetPort: management
+  selector:
+    {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-rabbitmq
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+spec:
+  serviceName: {{ include "gophprofile.fullname" . }}-rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "rabbitmq") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "rabbitmq") | nindent 8 }}
+      annotations:
+        checksum/memory: {{ .Values.rabbitmq.memoryHighWatermark | sha256sum }}
+    spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        # Без этого брокер не переживает ни одного перезапуска.
+        #
+        # fsGroup заставляет kubelet при каждом монтировании тома рекурсивно
+        # выставлять групповые права на его содержимое. Erlang хранит в томе
+        # файл .erlang.cookie и требует, чтобы он был доступен только владельцу:
+        # на втором старте права уже расширены, и процесс падает с
+        # "Cookie file must be accessible by owner only". Первый запуск проходит
+        # нормально, потому что файла ещё нет — отказ появляется ровно тогда,
+        # когда под впервые перезапускают.
+        #
+        # OnRootMismatch сверяет владельца и права корня тома и пропускает обход,
+        # если они уже совпадают. Права, выставленные при первом монтировании,
+        # сохраняются.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # Страховка к OnRootMismatch. Та политика пропускает обход только пока
+      # корень тома выглядит ожидаемо; правка fsGroup, восстановление тома
+      # из копии или пересоздание каталога провижионером снова запускают полный
+      # проход — и cookie расширяется снова. Инициализирующий контейнер
+      # отрабатывает после kubelet и до брокера, поэтому его chmod побеждает
+      # при любой политике.
+      initContainers:
+        - name: fix-cookie-mode
+          image: {{ .Values.rabbitmq.image }}
+          command:
+            - sh
+            - -c
+            - |
+              if [ -f /var/lib/rabbitmq/.erlang.cookie ]; then
+                chmod 0400 /var/lib/rabbitmq/.erlang.cookie
+                echo "права на cookie приведены к 0400"
+              else
+                echo "cookie ещё нет, первый запуск"
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+      containers:
+        - name: rabbitmq
+          image: {{ .Values.rabbitmq.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: {{ .Values.rabbitmq.auth.username | quote }}
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gophprofile.secretName" . }}
+                  key: rabbitmq-password
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_running"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 15
+          resources:
+            {{- toYaml .Values.rabbitmq.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+            # Один файл через subPath: каталог целиком перекрыл бы
+            # 10-defaults.conf из образа.
+            - name: config
+              mountPath: /etc/rabbitmq/conf.d/20-memory.conf
+              subPath: 20-memory.conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "gophprofile.fullname" . }}-rabbitmq
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.rabbitmq.storage.size }}
+{{- end }}

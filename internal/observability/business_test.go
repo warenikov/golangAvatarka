@@ -1,6 +1,7 @@
 package observability_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go-avatar-service/internal/breaker"
+	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/observability"
 )
 
@@ -162,4 +165,63 @@ func gather(t *testing.T, reg *prometheus.Registry) []*dto.MetricFamily {
 	require.NoError(t, err)
 
 	return families
+}
+
+func TestBreakerMetricsAreNilSafe(t *testing.T) {
+	var b *observability.Breakers
+
+	assert.NotPanics(t, func() {
+		b.BreakerRejected("postgres", breaker.RejectOpen)
+		require.NotNil(t, b.NewBreaker("postgres", config.Breaker{FailureThreshold: 1}))
+	})
+}
+
+func TestBreakerMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	b, err := observability.NewBreakers(reg)
+	require.NoError(t, err)
+
+	cfg := config.Breaker{FailureThreshold: 1, OpenTimeout: 50 * time.Millisecond, HalfOpenRequests: 1}
+	pg := b.NewBreaker("postgres", cfg)
+	b.NewBreaker("s3", cfg)
+
+	_ = pg.Do(func() error { return errors.New("connection refused") })
+	_ = pg.Do(func() error { return nil })
+
+	values := gatherBreakers(t, reg)
+	assert.InDelta(t, 2, values["circuit_breaker_state/postgres"], 0)
+	assert.InDelta(t, 0, values["circuit_breaker_state/s3"], 0)
+	assert.InDelta(t, 1, values["circuit_breaker_rejected_total/postgres/open"], 0)
+
+	require.Eventually(t, func() bool {
+		return gatherBreakers(t, reg)["circuit_breaker_state/postgres"] == 1
+	}, time.Second, 10*time.Millisecond, "без трафика разомкнутый выключатель должен стать полуоткрытым в метрике")
+
+	_, err = observability.NewBreakers(reg)
+	require.Error(t, err, "повторная регистрация должна вернуть ошибку")
+}
+
+func gatherBreakers(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	values := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			key := f.GetName()
+			for _, l := range m.GetLabel() {
+				key += "/" + l.GetValue()
+			}
+
+			if f.GetType() == dto.MetricType_GAUGE {
+				values[key] = m.GetGauge().GetValue()
+			} else {
+				values[key] = m.GetCounter().GetValue()
+			}
+		}
+	}
+
+	return values
 }

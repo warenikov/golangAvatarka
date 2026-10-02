@@ -3,6 +3,7 @@ package rest_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -54,6 +55,7 @@ func newAPI(t *testing.T) (http.Handler, apiDeps) {
 	cfg := &config.Config{}
 	cfg.App.MaxUploadBytes = testMaxUpload
 	cfg.App.AllowedMIME = []string{"image/jpeg", "image/png", "image/webp"}
+	cfg.Breaker.OpenTimeout = 30 * time.Second
 
 	svc := services.NewAvatarService(d.repo, d.storage, d.publisher, log)
 	h := rest.NewAvatarHandler(svc, cfg, log)
@@ -258,6 +260,60 @@ func TestUploadStorageFailure(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), assert.AnError.Error(), "внутренняя ошибка не раскрывается клиенту")
+}
+
+func TestUnavailableDependencyReturns503(t *testing.T) {
+	unavailable := fmt.Errorf("s3: %w", domain.ErrUnavailable)
+	id := uuid.New()
+
+	tests := []struct {
+		name    string
+		prepare func(d apiDeps)
+		request func(t *testing.T) *http.Request
+	}{
+		{
+			name: "загрузка при разомкнутом хранилище",
+			prepare: func(d apiDeps) {
+				d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+					Return(unavailable).Once()
+			},
+			request: func(t *testing.T) *http.Request {
+				return uploadRequest(t, testUserID, "file", pngBytes(t, 20, 20))
+			},
+		},
+		{
+			name: "метаданные при разомкнутой базе",
+			prepare: func(d apiDeps) {
+				d.repo.EXPECT().GetByID(mock.Anything, id).Return(nil, unavailable).Once()
+			},
+			request: func(*testing.T) *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/api/v1/avatars/"+id.String()+"/metadata", nil)
+			},
+		},
+		{
+			name: "текущая аватарка при разомкнутой базе, а не заглушка",
+			prepare: func(d apiDeps) {
+				d.repo.EXPECT().GetCurrentByUserID(mock.Anything, testUserID).Return(nil, unavailable).Once()
+			},
+			request: func(*testing.T) *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/api/v1/users/"+testUserID+"/avatar", nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api, d := newAPI(t)
+			tt.prepare(d)
+
+			rec := httptest.NewRecorder()
+			api.ServeHTTP(rec, tt.request(t))
+
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+			assert.NotContains(t, rec.Body.String(), "s3", "имя зависимости клиенту не раскрывается")
+		})
+	}
 }
 
 func TestGetStreamsContent(t *testing.T) {

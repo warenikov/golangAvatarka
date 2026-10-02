@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -23,6 +24,8 @@ const (
 	multipartMemory = 4 << 20
 	bytesInMB       = 1 << 20
 	createdLayout   = "02.01.2006 15:04"
+
+	unavailableMessage = "Сервис временно недоступен, попробуйте через минуту"
 )
 
 type Handler struct {
@@ -205,6 +208,12 @@ func (h *Handler) renderUploadError(ctx context.Context, w http.ResponseWriter, 
 		message = "Некорректный User ID: " + err.Error()
 	case errors.Is(err, domain.ErrInvalidFormat):
 		message = fmt.Sprintf("Неподдерживаемый формат. Разрешены: %v", h.cfg.App.AllowedMIME)
+	case errors.Is(err, domain.ErrUnavailable):
+		h.log.WarnContext(ctx, "загрузка через веб-форму отклонена выключателем", "err", err)
+		h.setRetryAfter(w)
+
+		status = http.StatusServiceUnavailable
+		message = unavailableMessage
 	default:
 		h.log.ErrorContext(ctx, "загрузка аватарки через веб-форму", "err", err)
 
@@ -222,6 +231,14 @@ func (h *Handler) renderListError(ctx context.Context, w http.ResponseWriter, er
 		return
 	}
 
+	if errors.Is(err, domain.ErrUnavailable) {
+		h.log.WarnContext(ctx, "галерея отклонена выключателем", "err", err)
+		h.setRetryAfter(w)
+		h.renderError(ctx, w, http.StatusServiceUnavailable, unavailableMessage, "")
+
+		return
+	}
+
 	h.log.ErrorContext(ctx, "список аватарок для галереи", "err", err)
 	h.renderError(ctx, w, http.StatusInternalServerError, "Не удалось загрузить галерею", "")
 }
@@ -232,10 +249,19 @@ func (h *Handler) renderDeleteError(ctx context.Context, w http.ResponseWriter, 
 		h.renderError(ctx, w, http.StatusNotFound, "Аватарка не найдена", "")
 	case errors.Is(err, domain.ErrForbidden):
 		h.renderError(ctx, w, http.StatusForbidden, "Чужую аватарку удалить нельзя", "")
+	case errors.Is(err, domain.ErrUnavailable):
+		h.log.WarnContext(ctx, "удаление через веб-форму отклонено выключателем", "err", err)
+		h.setRetryAfter(w)
+		h.renderError(ctx, w, http.StatusServiceUnavailable, unavailableMessage, "")
 	default:
 		h.log.ErrorContext(ctx, "удаление аватарки через веб-форму", "err", err)
 		h.renderError(ctx, w, http.StatusInternalServerError, "Не удалось удалить аватарку", "")
 	}
+}
+
+// setRetryAfter подсказывает клиенту, когда выключатель попробует зависимость снова.
+func (h *Handler) setRetryAfter(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(h.cfg.Breaker.OpenTimeout.Seconds())))
 }
 
 // galleryPath собирает путь галереи пользователя.

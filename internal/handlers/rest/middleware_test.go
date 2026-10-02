@@ -211,7 +211,7 @@ func TestHealthAllComponentsUp(t *testing.T) {
 		stubChecker{name: "postgres"}, stubChecker{name: "s3"}, stubChecker{name: "rabbitmq"})
 
 	rec := httptest.NewRecorder()
-	h.Handle(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.Ready(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -237,7 +237,7 @@ func TestHealthReportsDownComponent(t *testing.T) {
 		stubChecker{name: "rabbitmq", err: errors.New("dial tcp 10.0.0.1:5672: connection refused")})
 
 	rec := httptest.NewRecorder()
-	h.Handle(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.Ready(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
@@ -259,7 +259,7 @@ func TestHealthExposesErrorInDev(t *testing.T) {
 		stubChecker{name: "postgres", err: errors.New("connection refused")})
 
 	rec := httptest.NewRecorder()
-	h.Handle(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.Ready(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Contains(t, rec.Body.String(), "connection refused")
@@ -270,7 +270,7 @@ func TestHealthWithoutCheckers(t *testing.T) {
 	h := rest.NewHealthHandler(log, "dev", time.Second, false)
 
 	rec := httptest.NewRecorder()
-	h.Handle(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.Ready(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"components":{}`)
@@ -281,7 +281,7 @@ func TestResponderErrorFormat(t *testing.T) {
 	h := rest.NewHealthHandler(log, "dev", time.Second, false, stubChecker{name: "db", err: assert.AnError})
 
 	rec := httptest.NewRecorder()
-	h.Handle(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.Ready(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	assert.Contains(t, rec.Header().Get("Content-Type"), "application/json")
 	assert.True(t, strings.HasSuffix(rec.Body.String(), "\n"))
@@ -405,4 +405,47 @@ func TestSpanNameForUnmatchedRequestIsMethod(t *testing.T) {
 			assert.Equal(t, tt.wantSpan, spans[0].Name)
 		})
 	}
+}
+
+// Ключевое различие проб. Перезапуск не поднимет ни упавшую базу, ни брокер,
+// поэтому живость на них не смотрит: иначе отказ одной зависимости уносит
+// все реплики разом и частичная деградация становится полной.
+func TestLiveIgnoresBrokenComponents(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	h := rest.NewHealthHandler(log, "dev", time.Second, false,
+		stubChecker{name: "postgres", err: assert.AnError},
+		stubChecker{name: "rabbitmq", err: assert.AnError})
+
+	live := httptest.NewRecorder()
+	h.Live(live, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	require.Equal(t, http.StatusOK, live.Code, "процесс жив, чинить перезапуском нечего")
+	assert.NotContains(t, live.Body.String(), "components")
+
+	ready := httptest.NewRecorder()
+	h.Ready(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, ready.Code, "трафик принимать нечем")
+}
+
+// Между сигналом остановки и удалением пода из балансировки есть окно.
+// Отказ готовности закрывает его: оркестратор уводит трафик заранее.
+func TestDrainFailsReadinessButKeepsLiveness(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	h := rest.NewHealthHandler(log, "dev", time.Second, false, stubChecker{name: "postgres"})
+
+	before := httptest.NewRecorder()
+	h.Ready(before, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusOK, before.Code)
+
+	h.Drain()
+
+	after := httptest.NewRecorder()
+	h.Ready(after, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusServiceUnavailable, after.Code)
+	assert.Contains(t, after.Body.String(), "draining")
+
+	// Живость при этом остаётся: процесс дорабатывает начатые запросы,
+	// и перезапуск здесь только оборвал бы их.
+	live := httptest.NewRecorder()
+	h.Live(live, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	assert.Equal(t, http.StatusOK, live.Code)
 }

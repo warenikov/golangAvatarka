@@ -1,0 +1,56 @@
+---
+# Source: gophprofile/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gp-gophprofile-server
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gp-gophprofile-server
+  minReplicas: 1
+  maxReplicas: 5
+  # Проценты считаются от resources.requests, а не от лимитов. Без requests
+  # автомасштабирование по Utilization не работает в принципе: проценты
+  # не от чего брать, и HPA остаётся в состоянии unknown.
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+    # Память как второй сигнал. Она сама по себе плохой повод добавлять
+    # реплики — процесс с утечкой утащит за собой весь набор, — но
+    # обработка картинок держит декодированный кадр целиком в памяти,
+    # и рост числа параллельных загрузок виден здесь раньше, чем в CPU.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      policies:
+      - periodSeconds: 30
+        type: Percent
+        value: 50
+      stabilizationWindowSeconds: 60
+    scaleUp:
+      policies:
+      - periodSeconds: 15
+        type: Percent
+        value: 100
+      stabilizationWindowSeconds: 0
+

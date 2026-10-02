@@ -20,6 +20,7 @@ func validConfig() *config.Config {
 	cfg.App.Env = config.EnvDev
 	cfg.App.LogLevel = "info"
 	cfg.App.HTTPAddr = ":8080"
+	cfg.App.AdminAddr = ":8081"
 	cfg.App.MaxUploadBytes = 10 << 20
 	cfg.App.MaxImagePixels = 50_000_000
 	cfg.App.AllowedMIME = []string{"image/jpeg", "image/png"}
@@ -40,6 +41,9 @@ func validConfig() *config.Config {
 	cfg.RabbitMQ.RetryTTL = 30 * time.Second
 	cfg.RabbitMQ.MaxRetries = 5
 	cfg.RabbitMQ.Prefetch = 4
+	cfg.Breaker.FailureThreshold = 5
+	cfg.Breaker.OpenTimeout = 30 * time.Second
+	cfg.Breaker.HalfOpenRequests = 3
 
 	return cfg
 }
@@ -52,7 +56,7 @@ func validConfig() *config.Config {
 func isolateEnv(t *testing.T) {
 	t.Helper()
 
-	prefixes := []string{"APP_", "DB_", "S3_", "RABBITMQ_", "WORKER_"}
+	prefixes := []string{"APP_", "DB_", "S3_", "RABBITMQ_", "WORKER_", "BREAKER_"}
 
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
@@ -92,6 +96,9 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "avatars", cfg.S3.Bucket)
 	assert.Equal(t, 30*time.Second, cfg.RabbitMQ.RetryTTL)
 	assert.Equal(t, time.Minute, cfg.Worker.ReconcileInterval)
+	assert.Equal(t, uint32(5), cfg.Breaker.FailureThreshold)
+	assert.Equal(t, 30*time.Second, cfg.Breaker.OpenTimeout)
+	assert.Equal(t, uint32(3), cfg.Breaker.HalfOpenRequests)
 	assert.False(t, cfg.IsProd())
 }
 
@@ -112,6 +119,29 @@ func TestLoadFromEnv(t *testing.T) {
 	assert.Equal(t, []string{"image/png", "image/webp"}, cfg.App.AllowedMIME)
 	assert.Equal(t, 5433, cfg.DB.Port)
 	assert.Equal(t, 16, cfg.RabbitMQ.Prefetch)
+}
+
+// Пустая переменная не то же самое, что незаданная: env разбивает значение
+// по разделителю и возвращает срез из одной пустой строки. Без нормализации
+// такой элемент дошёл бы до валидации подсетей и уронил старт.
+func TestLoadTreatsEmptyProxyListAsAbsent(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("APP_TRUSTED_PROXY_CIDRS", "")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.App.TrustedProxyCIDRs)
+}
+
+func TestLoadParsesTrustedProxies(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("APP_TRUSTED_PROXY_CIDRS", "10.42.0.0/16, fd00::/8")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.42.0.0/16", "fd00::/8"}, cfg.App.TrustedProxyCIDRs)
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -156,6 +186,32 @@ func TestValidate(t *testing.T) {
 		},
 		{"пустой список CORS", func(c *config.Config) { c.App.CORSOrigins = nil }, "APP_CORS_ORIGINS"},
 		{"пустой служебный адрес воркера", func(c *config.Config) { c.Worker.AdminAddr = "" }, "WORKER_ADMIN_ADDR"},
+		{"пустой служебный адрес сервера", func(c *config.Config) { c.App.AdminAddr = "" }, "APP_ADMIN_ADDR"},
+		{
+			name:    "служебный адрес совпадает с публичным",
+			mutate:  func(c *config.Config) { c.App.AdminAddr = c.App.HTTPAddr },
+			wantErr: "метрики оказались бы на публичном порту",
+		},
+		{
+			name:    "отрицательная пауза слива",
+			mutate:  func(c *config.Config) { c.App.DrainDelay = -time.Second },
+			wantErr: "APP_DRAIN_DELAY",
+		},
+		{
+			name:    "слишком долгая пауза слива",
+			mutate:  func(c *config.Config) { c.App.DrainDelay = time.Hour },
+			wantErr: "APP_DRAIN_DELAY",
+		},
+		{
+			name:    "доверенный прокси не в формате CIDR",
+			mutate:  func(c *config.Config) { c.App.TrustedProxyCIDRs = []string{"10.42.0.1"} },
+			wantErr: "APP_TRUSTED_PROXY_CIDRS",
+		},
+		{
+			name:    "доверенные подсети в формате CIDR принимаются",
+			mutate:  func(c *config.Config) { c.App.TrustedProxyCIDRs = []string{"10.42.0.0/16", "fd00::/8"} },
+			wantErr: "",
+		},
 		{
 			name:    "трейсинг включён без адреса",
 			mutate:  func(c *config.Config) { c.Tracing.Endpoint = "" },
@@ -175,6 +231,10 @@ func TestValidate(t *testing.T) {
 		{"слишком длинный TTL", func(c *config.Config) { c.RabbitMQ.RetryTTL = 48 * time.Hour }, "RABBITMQ_RETRY_TTL"},
 		{"нет ретраев", func(c *config.Config) { c.RabbitMQ.MaxRetries = 0 }, "RABBITMQ_MAX_RETRIES"},
 		{"нулевой prefetch", func(c *config.Config) { c.RabbitMQ.Prefetch = 0 }, "RABBITMQ_PREFETCH"},
+		{"нулевой порог выключателя", func(c *config.Config) { c.Breaker.FailureThreshold = 0 }, "BREAKER_FAILURE_THRESHOLD"},
+		{"короткая пауза выключателя", func(c *config.Config) { c.Breaker.OpenTimeout = 0 }, "BREAKER_OPEN_TIMEOUT"},
+		{"долгая пауза выключателя", func(c *config.Config) { c.Breaker.OpenTimeout = time.Hour }, "BREAKER_OPEN_TIMEOUT"},
+		{"нет пробных запросов", func(c *config.Config) { c.Breaker.HalfOpenRequests = 0 }, "BREAKER_HALF_OPEN_REQUESTS"},
 	}
 
 	for _, tt := range tests {

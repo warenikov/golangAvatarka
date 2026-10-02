@@ -1,0 +1,30 @@
+{{- if .Values.rbac.create }}
+# Роль не создаётся по умолчанию: давать права незачем, приложение в API
+# не ходит. Блок оставлен точкой расширения — если однажды понадобится,
+# правила пишутся в rbac.rules и остаются в пределах неймспейса.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gophprofile.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+rules:
+  {{- toYaml .Values.rbac.rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gophprofile.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gophprofile.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gophprofile.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -24,6 +25,12 @@ const (
 	devS3SecretKey = "minioadmin"
 
 	maxRetryTTL = 24 * time.Hour
+
+	// Предел паузы слива: дольше неё под всё равно добьёт
+	// terminationGracePeriodSeconds, и остановка станет не мягкой, а грубой.
+	maxDrainDelay = 2 * time.Minute
+
+	maxBreakerOpenTimeout = 10 * time.Minute
 )
 
 type Config struct {
@@ -33,12 +40,18 @@ type Config struct {
 	RabbitMQ RabbitMQ
 	Worker   Worker
 	Tracing  Tracing
+	Breaker  Breaker
 }
 
 type App struct {
-	Env             string        `env:"APP_ENV" envDefault:"dev"`
-	LogLevel        string        `env:"APP_LOG_LEVEL" envDefault:"info"`
-	HTTPAddr        string        `env:"APP_HTTP_ADDR" envDefault:":8080"`
+	Env      string `env:"APP_ENV" envDefault:"dev"`
+	LogLevel string `env:"APP_LOG_LEVEL" envDefault:"info"`
+	HTTPAddr string `env:"APP_HTTP_ADDR" envDefault:":8080"`
+	// Служебный адрес сервера: /metrics, /livez, /readyz. Наружу не публикуется.
+	// Пробы ходят сюда, а не на публичный порт: там лимиты частоты, CORS
+	// и общий таймаут запроса, и любое из них способно завалить проверку
+	// живости по причине, к живости отношения не имеющей.
+	AdminAddr       string        `env:"APP_ADMIN_ADDR" envDefault:":8081"`
 	ShutdownTimeout time.Duration `env:"APP_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	RequestTimeout  time.Duration `env:"APP_REQUEST_TIMEOUT" envDefault:"60s"`
 	Version         string        `env:"APP_VERSION" envDefault:"dev"`
@@ -49,6 +62,16 @@ type App struct {
 	CORSOrigins     []string      `env:"APP_CORS_ORIGINS" envSeparator:"," envDefault:"http://localhost:8080"`
 	RateLimitRPM    int           `env:"APP_RATE_LIMIT_RPM" envDefault:"300"`
 	RateLimitUpload int           `env:"APP_RATE_LIMIT_UPLOAD_RPM" envDefault:"10"`
+	// Пауза между отказом готовности и остановкой приёма соединений.
+	// В Kubernetes удаление пода из endpoints происходит параллельно
+	// с доставкой SIGTERM, и без паузы часть запросов уходит в процесс,
+	// который уже закрывает слушатель. Локально пауза не нужна — ноль.
+	DrainDelay time.Duration `env:"APP_DRAIN_DELAY" envDefault:"0s"`
+	// Подсети обратных прокси, чьему X-Forwarded-For можно верить.
+	// Пусто — адрес клиента берётся из соединения. За ingress-контроллером
+	// это адрес его пода, один на весь кластер, и лимит частоты
+	// превращается в общее ведро для всех пользователей сразу.
+	TrustedProxyCIDRs []string `env:"APP_TRUSTED_PROXY_CIDRS" envSeparator:","`
 }
 
 type DB struct {
@@ -99,6 +122,13 @@ type Worker struct {
 	AdminAddr string `env:"WORKER_ADMIN_ADDR" envDefault:":8081"`
 }
 
+// Breaker — настройки выключателей внешних зависимостей: Postgres, S3 и брокера.
+type Breaker struct {
+	FailureThreshold uint32        `env:"BREAKER_FAILURE_THRESHOLD" envDefault:"5"`
+	OpenTimeout      time.Duration `env:"BREAKER_OPEN_TIMEOUT" envDefault:"30s"`
+	HalfOpenRequests uint32        `env:"BREAKER_HALF_OPEN_REQUESTS" envDefault:"3"`
+}
+
 // Load читает файл .env, если он существует, разбирает переменные окружения и проверяет значения.
 func Load() (*Config, error) {
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -109,6 +139,13 @@ func Load() (*Config, error) {
 	if err := env.Parse(&cfg); err != nil {
 		return nil, fmt.Errorf("parse environment: %w", err)
 	}
+
+	// До валидации, а не после: пустая переменная даёт срез из одной пустой
+	// строки — env разбивает значение по разделителю без проверки на пустоту.
+	cfg.App.TrustedProxyCIDRs = cleanList(cfg.App.TrustedProxyCIDRs)
+	cfg.App.AllowedMIME = cleanList(cfg.App.AllowedMIME)
+	cfg.App.CORSOrigins = cleanList(cfg.App.CORSOrigins)
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -151,6 +188,22 @@ func (c *Config) Validate() error {
 	if len(c.App.CORSOrigins) == 0 {
 		errs = append(errs, errors.New("APP_CORS_ORIGINS: список пуст"))
 	}
+	if c.App.AdminAddr == "" {
+		errs = append(errs, errors.New("APP_ADMIN_ADDR: пустой адрес"))
+	}
+	if c.App.AdminAddr == c.App.HTTPAddr {
+		errs = append(errs, fmt.Errorf(
+			"APP_ADMIN_ADDR совпадает с APP_HTTP_ADDR (%s): метрики оказались бы на публичном порту", c.App.HTTPAddr))
+	}
+	if c.App.DrainDelay < 0 || c.App.DrainDelay > maxDrainDelay {
+		errs = append(errs, fmt.Errorf("APP_DRAIN_DELAY: ожидается от 0s до %s, получено %s",
+			maxDrainDelay, c.App.DrainDelay))
+	}
+	for _, cidr := range c.App.TrustedProxyCIDRs {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			errs = append(errs, fmt.Errorf("APP_TRUSTED_PROXY_CIDRS: %q не подсеть в формате CIDR", cidr))
+		}
+	}
 	if c.Worker.AdminAddr == "" {
 		errs = append(errs, errors.New("WORKER_ADMIN_ADDR: пустой адрес"))
 	}
@@ -182,6 +235,16 @@ func (c *Config) Validate() error {
 	}
 	if c.RabbitMQ.Prefetch < 1 {
 		errs = append(errs, fmt.Errorf("RABBITMQ_PREFETCH: ожидается положительное число, получено %d", c.RabbitMQ.Prefetch))
+	}
+	if c.Breaker.FailureThreshold < 1 {
+		errs = append(errs, errors.New("BREAKER_FAILURE_THRESHOLD: ожидается положительное число"))
+	}
+	if c.Breaker.OpenTimeout < time.Second || c.Breaker.OpenTimeout > maxBreakerOpenTimeout {
+		errs = append(errs, fmt.Errorf("BREAKER_OPEN_TIMEOUT: ожидается от 1s до %s, получено %s",
+			maxBreakerOpenTimeout, c.Breaker.OpenTimeout))
+	}
+	if c.Breaker.HalfOpenRequests < 1 {
+		errs = append(errs, errors.New("BREAKER_HALF_OPEN_REQUESTS: ожидается положительное число"))
 	}
 
 	if c.App.Env == EnvProd {
@@ -237,4 +300,22 @@ func (a App) AllowedMIMESet(mime string) bool {
 	return slices.ContainsFunc(a.AllowedMIME, func(m string) bool {
 		return strings.EqualFold(strings.TrimSpace(m), mime)
 	})
+}
+
+// cleanList приводит в порядок список, пришедший из переменной окружения:
+// убирает пробелы вокруг элементов и выбрасывает пустые.
+//
+// Пробелы неизбежны: списки задаются человеком в values-файлах и compose,
+// и "a, b" пишется куда естественнее, чем "a,b". Без обрезки второй элемент
+// приезжает с ведущим пробелом и не совпадает ни с чем — CORS молча перестаёт
+// пропускать origin, подсеть прокси не разбирается, тип MIME не проходит проверку.
+func cleanList(values []string) []string {
+	result := values[:0]
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+
+	return result
 }
