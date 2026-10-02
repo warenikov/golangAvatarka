@@ -1,0 +1,24 @@
+apiVersion: v2
+name: gophprofile
+description: Сервис аватарок GophProfile — HTTP-сервер, воркер обработки и их окружение
+type: application
+
+# version — версия чарта, appVersion — версия приложения в образе.
+# Они живут по разным правилам: правка шаблона поднимает первую, не трогая вторую.
+version: 0.1.0
+appVersion: "0.3.0"
+
+# HPA использует autoscaling/v2, он стабилен с 1.23. Pod Security Admission
+# в режиме enforce доступен с 1.25 — на более старом кластере лейблы
+# неймспейса просто не сработают, и об этом лучше узнать при установке.
+kubeVersion: ">=1.25.0-0"
+
+keywords:
+  - avatars
+  - images
+  - go
+home: https://github.com/warenikov/golangAvatarka
+sources:
+  - https://github.com/warenikov/golangAvatarka
+maintainers:
+  - name: AlexW

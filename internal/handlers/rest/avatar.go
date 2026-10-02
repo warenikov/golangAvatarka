@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -137,6 +138,8 @@ func (h *AvatarHandler) writeUploadError(ctx context.Context, w http.ResponseWri
 			fmt.Sprintf("Supported formats: %v", h.cfg.App.AllowedMIME))
 	case errors.Is(err, domain.ErrInvalidUserID):
 		h.Error(ctx, w, http.StatusBadRequest, "Invalid request", err.Error())
+	case errors.Is(err, domain.ErrUnavailable):
+		h.writeUnavailable(ctx, w, err)
 	default:
 		h.log.ErrorContext(ctx, "загрузка аватарки", "err", err)
 		h.Error(ctx, w, http.StatusInternalServerError, "Internal error", "")
@@ -384,10 +387,21 @@ func (h *AvatarHandler) writeReadError(ctx context.Context, w http.ResponseWrite
 		h.Error(ctx, w, http.StatusForbidden, "Forbidden", "You can only delete your own avatars")
 	case errors.Is(err, domain.ErrInvalidUserID):
 		h.Error(ctx, w, http.StatusBadRequest, "Invalid user id", err.Error())
+	case errors.Is(err, domain.ErrUnavailable):
+		h.writeUnavailable(ctx, w, err)
 	default:
 		h.log.ErrorContext(ctx, "обработка запроса аватарки", "err", err)
 		h.Error(ctx, w, http.StatusInternalServerError, "Internal error", "")
 	}
+}
+
+// writeUnavailable отвечает 503, пока выключатель зависимости разомкнут,
+// и подсказывает клиенту, когда повторить запрос.
+func (h *AvatarHandler) writeUnavailable(ctx context.Context, w http.ResponseWriter, err error) {
+	h.log.WarnContext(ctx, "зависимость недоступна, запрос отклонён", "err", err)
+
+	w.Header().Set("Retry-After", strconv.Itoa(int(h.cfg.Breaker.OpenTimeout.Seconds())))
+	h.Error(ctx, w, http.StatusServiceUnavailable, "Service temporarily unavailable", "")
 }
 
 func toMetadata(a *domain.Avatar) metadataResponse {

@@ -1,0 +1,28 @@
+{{- if .Values.monitoring.grafanaDashboards.enabled }}
+# Дашборды для Grafana. Сайдкар kube-prometheus-stack подбирает ConfigMap
+# по лейблу и раскладывает содержимое в каталог дашбордов — провижининг
+# через файлы, как в compose, в кластере не работает: файловой системы,
+# общей с Grafana, здесь нет.
+#
+# overview.json — копия docker/observability/grafana/dashboards: Helm читает
+# только то, что лежит внутри каталога чарта, снаружи ему файлы недоступны.
+# Копию обновляет `make k8s-render`, чтобы два контура не разъезжались.
+#
+# cluster.json есть только здесь: он строится на kube-state-metrics,
+# которых в compose нет. CPU и память сервера и воркера берутся из метрик
+# самого процесса, а не из cAdvisor — kubelet OrbStack контейнерных
+# метрик не отдаёт, и панели на них остались бы пустыми.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    {{ .Values.monitoring.grafanaDashboards.label }}: "1"
+data:
+  {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- end }}

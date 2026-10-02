@@ -1,0 +1,21 @@
+{{- range $component := list "server" "worker" }}
+{{- $settings := index $.Values $component }}
+{{- if $settings.podDisruptionBudget.enabled }}
+---
+# Добровольные выселения — слив узла, обновление кластера — иначе способны
+# снять все реплики разом. Бюджет не защищает от падения узла: там выселение
+# недобровольное, и его никто не спрашивает.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "gophprofile.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  minAvailable: {{ $settings.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+{{- end }}
+{{- end }}

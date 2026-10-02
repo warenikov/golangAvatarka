@@ -1,0 +1,65 @@
+---
+# Source: gophprofile/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gp-gophprofile-server
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    # Отдельный именованный порт, а не тот же http: ServiceMonitor отбирает
+    # цель по имени порта, а Ingress маршрутизирует только на http —
+    # так метрики остаются внутри кластера.
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/component: server
+
+---
+# Source: gophprofile/templates/service.yaml
+# У воркера нет пользовательского API, и балансировать по нему нечего.
+# Service здесь существует ради одного: дать ServiceMonitor цель для сбора
+# метрик. Отсюда clusterIP: None — адрес не нужен, нужны endpoints подов.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gp-gophprofile-worker
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: worker
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/component: worker
+

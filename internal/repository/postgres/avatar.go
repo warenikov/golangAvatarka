@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/domain"
 )
 
@@ -19,7 +20,8 @@ const avatarColumns = `id, user_id, file_name, mime_type, size_bytes, width, hei
 	created_at, updated_at, deleted_at`
 
 type AvatarRepository struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	breaker *breaker.Breaker
 }
 
 // NewAvatarRepository создаёт репозиторий метаданных аватарок.
@@ -27,8 +29,7 @@ func NewAvatarRepository(pool *pgxpool.Pool) *AvatarRepository {
 	return &AvatarRepository{pool: pool}
 }
 
-// Create сохраняет метаданные загруженной аватарки.
-func (r *AvatarRepository) Create(ctx context.Context, a *domain.Avatar) error {
+func (r *AvatarRepository) create(ctx context.Context, a *domain.Avatar) error {
 	thumbs, err := marshalThumbnails(a.ThumbnailS3Keys)
 	if err != nil {
 		return err
@@ -51,8 +52,7 @@ func (r *AvatarRepository) Create(ctx context.Context, a *domain.Avatar) error {
 	return nil
 }
 
-// GetByID возвращает аватарку по идентификатору, исключая мягко удалённые.
-func (r *AvatarRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
+func (r *AvatarRepository) getByID(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
 	q := `SELECT ` + avatarColumns + ` FROM avatars WHERE id = $1 AND deleted_at IS NULL`
 
 	a, err := scanAvatar(r.pool.QueryRow(ctx, q, id))
@@ -63,8 +63,7 @@ func (r *AvatarRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.A
 	return a, nil
 }
 
-// GetCurrentByUserID возвращает последнюю загруженную аватарку пользователя.
-func (r *AvatarRepository) GetCurrentByUserID(ctx context.Context, userID string) (*domain.Avatar, error) {
+func (r *AvatarRepository) getCurrentByUserID(ctx context.Context, userID string) (*domain.Avatar, error) {
 	q := `SELECT ` + avatarColumns + ` FROM avatars
 		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -78,8 +77,7 @@ func (r *AvatarRepository) GetCurrentByUserID(ctx context.Context, userID string
 	return a, nil
 }
 
-// ListByUserID возвращает все аватарки пользователя, новые первыми.
-func (r *AvatarRepository) ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error) {
+func (r *AvatarRepository) listByUserID(ctx context.Context, userID string) ([]domain.Avatar, error) {
 	q := `SELECT ` + avatarColumns + ` FROM avatars
 		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC`
@@ -106,8 +104,7 @@ func (r *AvatarRepository) ListByUserID(ctx context.Context, userID string) ([]d
 	return avatars, nil
 }
 
-// SoftDelete помечает аватарку удалённой и возвращает ключи её объектов в хранилище.
-func (r *AvatarRepository) SoftDelete(ctx context.Context, id uuid.UUID, userID string) ([]string, error) {
+func (r *AvatarRepository) softDelete(ctx context.Context, id uuid.UUID, userID string) ([]string, error) {
 	const q = `UPDATE avatars
 		SET deleted_at = NOW(), updated_at = NOW()
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
@@ -155,9 +152,7 @@ func (r *AvatarRepository) deleteConflict(ctx context.Context, id uuid.UUID, use
 	return fmt.Errorf("delete avatar %s: %w", id, domain.ErrAvatarNotFound)
 }
 
-// UpdateProcessingResult сохраняет результат обработки. Повторный вызов для уже
-// обработанной аватарки ничего не меняет и возвращает false.
-func (r *AvatarRepository) UpdateProcessingResult(
+func (r *AvatarRepository) updateProcessingResult(
 	ctx context.Context, id uuid.UUID, thumbnails map[string]string, width, height int,
 ) (bool, error) {
 	thumbs, err := marshalThumbnails(thumbnails)
@@ -178,8 +173,7 @@ func (r *AvatarRepository) UpdateProcessingResult(
 	return tag.RowsAffected() > 0, nil
 }
 
-// SetProcessingStatus меняет статус обработки аватарки.
-func (r *AvatarRepository) SetProcessingStatus(ctx context.Context, id uuid.UUID, status domain.ProcessingStatus) error {
+func (r *AvatarRepository) setProcessingStatus(ctx context.Context, id uuid.UUID, status domain.ProcessingStatus) error {
 	const q = `UPDATE avatars SET processing_status = $1, updated_at = NOW() WHERE id = $2`
 
 	if _, err := r.pool.Exec(ctx, q, status, id); err != nil {
@@ -189,8 +183,7 @@ func (r *AvatarRepository) SetProcessingStatus(ctx context.Context, id uuid.UUID
 	return nil
 }
 
-// ListPendingOlderThan возвращает аватарки, застрявшие в ожидании обработки.
-func (r *AvatarRepository) ListPendingOlderThan(ctx context.Context, age time.Duration, limit int) ([]domain.Avatar, error) {
+func (r *AvatarRepository) listPendingOlderThan(ctx context.Context, age time.Duration, limit int) ([]domain.Avatar, error) {
 	q := `SELECT ` + avatarColumns + ` FROM avatars
 		WHERE processing_status = $1 AND deleted_at IS NULL AND created_at < $2
 		ORDER BY created_at
@@ -274,12 +267,7 @@ func unmarshalThumbnails(b []byte) (map[string]string, error) {
 	return m, nil
 }
 
-// CountPendingOlderThan считает аватарки, застрявшие в ожидании обработки.
-//
-// Отдельный запрос нужен потому, что ListPendingOlderThan ограничен размером
-// пачки: показывать в метрике отставания её потолок значит не отличать
-// небольшую задержку от полной остановки воркера.
-func (r *AvatarRepository) CountPendingOlderThan(ctx context.Context, age time.Duration) (int, error) {
+func (r *AvatarRepository) countPendingOlderThan(ctx context.Context, age time.Duration) (int, error) {
 	q := `SELECT count(*) FROM avatars
 		WHERE processing_status = $1 AND deleted_at IS NULL AND created_at < $2`
 

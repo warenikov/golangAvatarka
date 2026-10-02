@@ -1,0 +1,101 @@
+{{- if .Values.migrations.enabled }}
+# Миграции схемы как хук релиза.
+#
+# Схему меняет ровно одна задача, а не каждая реплика при старте: при трёх
+# репликах одновременный goose — гонка, а изменение схемы прикладным процессом
+# мешает откатывать релиз. Поэтому APP_AUTO_MIGRATE в ConfigMap выключен.
+#
+# Фаза хука задаётся значением migrations.hook, и выбор здесь не косметический.
+#
+# pre-install,pre-upgrade — правильная фаза: Helm дожидается джоба до выката
+# подов, и новый код никогда не стартует на старой схеме. Она требует, чтобы
+# база уже существовала: hook-фазы выполняются раньше всех обычных ресурсов
+# релиза.
+#
+# post-install,post-upgrade нужна там, где база едет тем же релизом
+# (postgresql.enabled=true): до неё ресурсы чарта ещё не созданы, и pre-хук
+# ждал бы несуществующий Service до самого таймаута. Плата — окно, в котором
+# новый код работает на старой схеме. Для учебного контура приемлемо,
+# для продакшена — нет, там база живёт снаружи и фаза остаётся pre.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": {{ .Values.migrations.hook | quote }}
+    "helm.sh/hook-weight": "0"
+    # Предыдущий джоб удаляется перед созданием нового: имя одно и то же,
+    # а спецификация Job неизменяема после создания.
+    "helm.sh/hook-delete-policy": before-hook-creation
+    # Логи контейнера попадают в вывод helm при падении хука. Без этого
+    # диагностика упавшей миграции начинается с поиска уже удалённого пода.
+    "helm.sh/hook-output-log-policy": hook-failed
+spec:
+  # Ноль: упавшая миграция должна упасть сразу и с понятной ошибкой, а не
+  # крутиться в фоне, пока helm ждёт истечения таймаута.
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "gophprofile.podSecurityContext" . | nindent 8 }}
+      {{- if .Values.postgresql.enabled }}
+      # База едет тем же релизом и поднимается не мгновенно. Без ожидания джоб
+      # падает на первом же подключении и уносит с собой всю установку.
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.postgresql.image }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER"; do
+                echo "жду postgres на $DB_HOST"
+                sleep 2
+              done
+          securityContext:
+            {{- include "gophprofile.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: DB_HOST
+              value: {{ include "gophprofile.dbHost" . | quote }}
+            - name: DB_USER
+              value: {{ .Values.database.user | quote }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "gophprofile.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/migrate", "up"]
+          securityContext:
+            {{- include "gophprofile.containerSecurityContext" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.configMapName" . }}
+          env:
+            {{- include "gophprofile.secretEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "gophprofile.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "gophprofile.tmpVolume" . | nindent 8 }}
+{{- end }}

@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -49,6 +50,7 @@ func serviceRouter(t *testing.T) (http.Handler, webDeps) {
 	cfg := &config.Config{}
 	cfg.App.MaxUploadBytes = testMaxUpload
 	cfg.App.AllowedMIME = []string{"image/jpeg", "image/png", "image/webp"}
+	cfg.Breaker.OpenTimeout = 30 * time.Second
 
 	h := NewHandler(services.NewAvatarService(d.repo, d.storage, d.publisher, log), cfg, log)
 
@@ -230,6 +232,39 @@ func TestGalleryRepositoryFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Не удалось загрузить галерею")
+}
+
+func TestGalleryDependencyUnavailable(t *testing.T) {
+	router, d := serviceRouter(t)
+
+	d.repo.EXPECT().ListByUserID(mock.Anything, webUserID).
+		Return(nil, fmt.Errorf("postgres: %w", domain.ErrUnavailable)).Once()
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/web/gallery/"+webUserID, nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), "временно недоступен")
+}
+
+func TestUploadDependencyUnavailable(t *testing.T) {
+	router, d := serviceRouter(t)
+
+	d.storage.EXPECT().Put(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(fmt.Errorf("s3: %w", domain.ErrUnavailable)).Once()
+
+	contentType, body := multipartUpload(t, webUserID, form.FieldFile, "avatar.png", webPNG(t))
+
+	req := httptest.NewRequest(http.MethodPost, "/web/upload", body)
+	req.Header.Set("Content-Type", contentType)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), "временно недоступен")
 }
 
 func TestDeleteFromGallery(t *testing.T) {

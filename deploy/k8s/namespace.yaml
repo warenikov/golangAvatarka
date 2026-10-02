@@ -1,0 +1,32 @@
+# Неймспейс приложения и ограничения на поды в нём.
+#
+# Живёт вне Helm-чарта намеренно. Helm записывает состояние релиза в Secret
+# внутри целевого неймспейса, и делает это раньше, чем применяет манифесты:
+# чарт, создающий собственный неймспейс, падает ещё до первого ресурса
+# с «namespaces not found». Флаг --create-namespace создаёт неймспейс мимо
+# релиза, без лейблов, и повесить их потом уже нечем.
+#
+# Поэтому порядок такой: сначала этот файл, затем helm install.
+#
+# PodSecurityPolicy, о котором говорит задание, удалён из Kubernetes в 1.25 —
+# применить его физически некуда. Штатная замена — Pod Security Admission:
+# контроллер приёма проверяет каждый под неймспейса на соответствие профилю.
+#
+# restricted — самый строгий из трёх профилей. Он требует runAsNonRoot,
+# запрещает повышение привилегий и хостовые пространства имён, требует
+# drop ALL для capabilities и seccompProfile. Контейнеры чарта под него
+# подогнаны; под, который нарушит профиль, будет отклонён при создании,
+# а не тихо запущен с лишними правами.
+#
+# audit и warn выставлены в тот же профиль: нарушение попадёт и в журнал
+# аудита, и в предупреждение kubectl — иначе о нём узнают только по отказу.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gophprofile
+  labels:
+    app.kubernetes.io/part-of: gophprofile
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

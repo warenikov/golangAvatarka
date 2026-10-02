@@ -1,0 +1,136 @@
+---
+# Source: gophprofile/templates/deps-postgresql.yaml
+# PostgreSQL для локального кластера.
+#
+# Это намеренно минимальный вариант: один экземпляр, без репликации, резервных
+# копий и настройки параметров. Он существует, чтобы `helm install` поднимал
+# рабочий контур одной командой. В продакшене postgresql.enabled=false,
+# и база приезжает снаружи — через оператора или управляемый сервис.
+#
+# Чарты Bitnami сознательно не используются: с осени 2025 их образы уехали
+# в платный каталог, и зависимость, которая перестанет ставиться к моменту
+# проверки, дороже трёх десятков строк своего манифеста.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gp-gophprofile-postgresql
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: postgresql
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+  selector:
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/component: postgresql
+
+---
+# Source: gophprofile/templates/deps-postgresql.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gp-gophprofile-postgresql
+  namespace: gophprofile
+  labels:
+    helm.sh/chart: gophprofile-0.1.0
+    app.kubernetes.io/name: gophprofile
+    app.kubernetes.io/instance: gp
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gophprofile
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: gp-gophprofile-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gophprofile
+      app.kubernetes.io/instance: gp
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gophprofile
+        app.kubernetes.io/instance: gp
+        app.kubernetes.io/component: postgresql
+    spec:
+      # Зависимости в API-сервер не ходят так же, как и приложение.
+      # Смонтированный токен здесь был бы просто лишней точкой опоры.
+      automountServiceAccountToken: false
+      securityContext:
+        # Пользователь postgres в официальном образе. fsGroup нужен, чтобы том
+        # оказался доступен на запись процессу без прав root: без него initdb
+        # падает на создании каталога данных.
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgresql
+          image: postgres:16-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: "avatars"
+            - name: POSTGRES_DB
+              value: "avatars"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gp-gophprofile-secrets
+                  key: db-password
+            # Подкаталог, а не корень тома: на корне смонтированного тома
+            # у части провайдеров лежит lost+found, и initdb отказывается
+            # работать в непустом каталоге.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "avatars", "-d", "avatars"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "avatars", "-d", "avatars"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+

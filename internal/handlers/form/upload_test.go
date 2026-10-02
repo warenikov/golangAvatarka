@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"testing"
 
@@ -141,4 +142,50 @@ func TestImageCloseIsSafe(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, img.Close())
+}
+
+func TestReadImageCleansFileName(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		want     string
+	}{
+		{"обычное имя не меняется", "аватар.png", "аватар.png"},
+		{"длинное имя обрезается по символам, а не по байтам", strings.Repeat("я", 300) + ".png", strings.Repeat("я", 255)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			img, err := form.ReadImage(request(t, form.FieldFile, tt.filename, pngBytes(t, 10, 10)), allowedMIME)
+			require.NoError(t, err)
+			defer func() { _ = img.Close() }()
+
+			assert.Equal(t, tt.want, img.Name)
+		})
+	}
+}
+
+// Сырые управляющие символы multipart не пропускает, а закодированные по RFC 2231 — да.
+func TestReadImageDropsEncodedControlChars(t *testing.T) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename*=UTF-8''ava%00tar%01.png`)
+	header.Set("Content-Type", "application/octet-stream")
+
+	part, err := mw.CreatePart(header)
+	require.NoError(t, err)
+	_, err = part.Write(pngBytes(t, 10, 10))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	img, err := form.ReadImage(req, allowedMIME)
+	require.NoError(t, err)
+	defer func() { _ = img.Close() }()
+
+	assert.Equal(t, "avatar.png", img.Name, "NUL не принимает PostgreSQL, и строка не записалась бы")
 }

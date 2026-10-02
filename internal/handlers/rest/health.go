@@ -5,14 +5,14 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	healthTimeout = 2 * time.Second
-
-	statusOK   = "ok"
-	statusDown = "down"
+	statusOK       = "ok"
+	statusDown     = "down"
+	statusDraining = "draining"
 )
 
 // Checker описывает компонент, состояние которого отражается в ответе /health.
@@ -36,6 +36,13 @@ type healthResponse struct {
 	UptimeS    int64                      `json:"uptime_s"`
 }
 
+// statusResponse — ответ без опроса компонентов: живость и режим слива.
+type statusResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+	UptimeS int64  `json:"uptime_s"`
+}
+
 type HealthHandler struct {
 	responder
 	checkers    []Checker
@@ -43,6 +50,11 @@ type HealthHandler struct {
 	timeout     time.Duration
 	started     time.Time
 	exposeError bool
+
+	// draining взводится при получении сигнала остановки. С этого момента
+	// готовность отвечает отказом, оркестратор убирает под из балансировки,
+	// и только потом процесс перестаёт принимать соединения.
+	draining atomic.Bool
 }
 
 // NewHealthHandler создаёт обработчик проверки работоспособности сервиса.
@@ -59,8 +71,37 @@ func NewHealthHandler(log *slog.Logger, version string, timeout time.Duration, e
 	}
 }
 
-// Handle опрашивает компоненты параллельно и отвечает 503, если хотя бы один недоступен.
-func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
+// Drain переводит обработчик в режим остановки: готовность начинает отвечать отказом.
+func (h *HealthHandler) Drain() {
+	h.draining.Store(true)
+}
+
+// Live отвечает, жив ли процесс, и ничего больше не проверяет.
+//
+// Состояние зависимостей сюда намеренно не входит. Проверку живости
+// оркестратор лечит перезапуском, а перезапуск не чинит ни упавшую базу,
+// ни недоступный брокер: он лишь превращает частичный отказ в полный,
+// разом убивая все реплики, которые на самом деле исправны.
+func (h *HealthHandler) Live(w http.ResponseWriter, r *http.Request) {
+	h.JSON(r.Context(), w, http.StatusOK, statusResponse{
+		Status:  statusOK,
+		Version: h.version,
+		UptimeS: int64(time.Since(h.started).Seconds()),
+	})
+}
+
+// Ready опрашивает компоненты параллельно и отвечает 503, если хотя бы один недоступен.
+func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
+	if h.draining.Load() {
+		h.JSON(r.Context(), w, http.StatusServiceUnavailable, statusResponse{
+			Status:  statusDraining,
+			Version: h.version,
+			UptimeS: int64(time.Since(h.started).Seconds()),
+		})
+
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 

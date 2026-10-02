@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "values чарта gophprofile",
+  "description": "Схема ловит опечатки и неверные типы до того, как они доедут до кластера. Проверяются ключи, ошибка в которых даёт отказ не при установке, а позже и не там: пустой список CORS, подсеть прокси не в формате CIDR, потолок HPA ниже минимума.",
+  "type": "object",
+  "required": ["image", "app", "server", "worker", "service"],
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+
+    "app": {
+      "type": "object",
+      "required": ["env", "logLevel", "corsOrigins"],
+      "properties": {
+        "env": {
+          "description": "prod включает проверки конфига: дефолтные пароли и wildcard в CORS отвергаются на старте.",
+          "enum": ["dev", "prod"]
+        },
+        "logLevel": { "enum": ["debug", "info", "warn", "error"] },
+        "requestTimeout": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+        "shutdownTimeout": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+        "drainDelay": {
+          "description": "Пауза между отказом готовности и остановкой приёма соединений.",
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
+        },
+        "maxUploadBytes": { "type": "integer", "minimum": 1 },
+        "maxImagePixels": { "type": "integer", "minimum": 1 },
+        "allowedMIME": { "type": "string", "minLength": 1 },
+        "corsOrigins": {
+          "description": "Пустой список конфигурация не принимает, а '*' запрещён при env=prod.",
+          "type": "string",
+          "minLength": 1
+        },
+        "rateLimitRPM": { "type": "integer", "minimum": 1 },
+        "rateLimitUploadRPM": { "type": "integer", "minimum": 1 },
+        "trustedProxyCIDRs": {
+          "description": "Список подсетей через запятую. Пусто — адрес клиента берётся из соединения.",
+          "type": "string"
+        },
+        "breaker": {
+          "description": "Автоматические выключатели внешних зависимостей.",
+          "type": "object",
+          "properties": {
+            "failureThreshold": { "type": "integer", "minimum": 1 },
+            "openTimeout": {
+              "description": "Длительность в формате Go, от 1s до 10m. Диапазон проверяет сам сервис на старте.",
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m))+$"
+            },
+            "halfOpenRequests": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+
+    "server": { "$ref": "#/$defs/workload" },
+    "worker": { "$ref": "#/$defs/workload" },
+
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string" },
+        "path": { "type": "string" },
+        "pathType": { "enum": ["Exact", "Prefix", "ImplementationSpecific"] },
+        "annotations": { "type": "object" },
+        "tls": { "type": "array" }
+      }
+    },
+
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "server": { "$ref": "#/$defs/autoscaler" },
+        "worker": { "$ref": "#/$defs/autoscaler" }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountToken": {
+          "description": "true монтирует в под действующий токен доступа к API-серверу. Приложению он не нужен.",
+          "type": "boolean"
+        }
+      }
+    },
+
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "rules": { "type": "array" }
+      }
+    },
+
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "runAsUser": { "type": "integer", "minimum": 1, "description": "Ноль означал бы root, а профиль restricted его не пропустит." },
+        "runAsGroup": { "type": "integer", "minimum": 1 },
+        "readOnlyRootFilesystem": { "type": "boolean" }
+      }
+    },
+
+    "migrations": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hook": {
+          "description": "pre — схема обновляется до выката подов, требует существующей базы. post — когда база едет тем же релизом.",
+          "enum": ["pre-install,pre-upgrade", "post-install,post-upgrade"]
+        },
+        "backoffLimit": { "type": "integer", "minimum": 0 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "database": {
+      "type": "object",
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "name": { "type": "string", "minLength": 1 },
+        "user": { "type": "string", "minLength": 1 },
+        "sslMode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
+        "maxConns": { "type": "integer", "minimum": 1 },
+        "minConns": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressNamespace": { "type": "string", "minLength": 1 },
+        "monitoringNamespace": { "type": "string", "minLength": 1 },
+        "dnsNamespace": {
+          "description": "Неймспейс kube-dns. Забытый исход на DNS выглядит как недоступная база, хотя сеть до неё открыта.",
+          "type": "string",
+          "minLength": 1
+        },
+        "extraEgress": { "type": "array" },
+        "extraIngress": { "type": "array" }
+      }
+    },
+
+    "rabbitmq": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "url": { "type": "string" },
+        "exchange": { "type": "string", "minLength": 1 },
+        "retryTTL": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+        "maxRetries": { "type": "integer", "minimum": 1 },
+        "prefetch": { "type": "integer", "minimum": 1 },
+        "memoryHighWatermark": {
+          "description": "Абсолютный порог памяти брокера. Должен быть ниже лимита контейнера.",
+          "type": "string",
+          "pattern": "^[0-9]+(KiB|MiB|GiB|kB|MB|GB)$"
+        }
+      }
+    },
+
+    "tracing": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string" },
+        "sampleRatio": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": {
+          "description": "Имя готового Secret. Задано — пароли не проходят через values и не оседают в истории релизов.",
+          "type": "string"
+        },
+        "dbPassword": { "type": "string" },
+        "s3AccessKey": { "type": "string" },
+        "s3SecretKey": { "type": "string" }
+      }
+    }
+  },
+
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "description": "Обязательны при включённом HPA: проценты Utilization считаются именно от них.",
+              "type": "object"
+            },
+            "limits": { "type": "object" }
+          }
+        },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "probes": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "topologySpreadConstraints": { "type": "array" },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["integer", "string"] }
+          }
+        }
+      }
+    },
+
+    "autoscaler": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "targetMemoryUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "behavior": { "type": "object" }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,7 @@ type routerOpts struct {
 	rateLimitUpload int
 	corsOrigins     []string
 	checkers        []rest.Checker
+	trustedProxies  []string
 }
 
 // newRouter собирает боевой роутер целиком: middleware, лимиты, CORS и таблицу
@@ -54,6 +56,7 @@ func newRouter(t *testing.T, opts routerOpts) (http.Handler, apiDeps) {
 	cfg.App.RateLimitRPM = opts.rateLimitRPM
 	cfg.App.RateLimitUpload = opts.rateLimitUpload
 	cfg.App.CORSOrigins = opts.corsOrigins
+	cfg.App.TrustedProxyCIDRs = opts.trustedProxies
 
 	if cfg.App.RateLimitRPM == 0 {
 		cfg.App.RateLimitRPM = 1000
@@ -76,11 +79,10 @@ func newRouter(t *testing.T, opts routerOpts) (http.Handler, apiDeps) {
 		Config:        cfg,
 		Log:           log,
 		Metrics:       httpMetrics,
-		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(svc, cfg, log),
 		Web:           webui.NewHandler(svc, cfg, log, uploadLimiter),
+		Health:        rest.NewHealthHandler(log, cfg.App.Version, time.Second, true, opts.checkers...),
 		UploadLimiter: uploadLimiter,
-		Checkers:      opts.checkers,
 	})
 
 	return router, d
@@ -97,7 +99,8 @@ func TestRouterRoutes(t *testing.T) {
 	}{
 		{"корень уводит на загрузку", http.MethodGet, "/", http.StatusFound},
 		{"health", http.MethodGet, "/health", http.StatusOK},
-		{"metrics", http.MethodGet, "/metrics", http.StatusOK},
+		{"livez", http.MethodGet, "/livez", http.StatusOK},
+		{"readyz", http.MethodGet, "/readyz", http.StatusOK},
 		{"страница загрузки", http.MethodGet, "/web/upload", http.StatusOK},
 		{"поиск галереи", http.MethodGet, "/web/gallery", http.StatusOK},
 		{"статика", http.MethodGet, "/static/", http.StatusOK},
@@ -175,7 +178,7 @@ func TestSecurityHeaders(t *testing.T) {
 func TestCORSAllowsConfiguredOrigin(t *testing.T) {
 	router, _ := newRouter(t, routerOpts{corsOrigins: []string{testOrigin}})
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Origin", testOrigin)
 
 	rec := httptest.NewRecorder()
@@ -193,7 +196,7 @@ func TestCORSAllowsConfiguredOrigin(t *testing.T) {
 func TestCORSRejectsUnknownOrigin(t *testing.T) {
 	router, _ := newRouter(t, routerOpts{corsOrigins: []string{testOrigin}})
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://evil.example.com")
 
 	rec := httptest.NewRecorder()
@@ -232,12 +235,12 @@ func TestRateLimitByIP(t *testing.T) {
 
 	for i := range limit {
 		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-		require.Equal(t, http.StatusOK, rec.Code, "запрос %d должен пройти", i+1)
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		require.Equal(t, http.StatusFound, rec.Code, "запрос %d должен пройти", i+1)
 	}
 
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Too many requests")
@@ -257,13 +260,13 @@ func TestRateLimitIgnoresForwardedHeaders(t *testing.T) {
 
 	for i := range limit {
 		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-		require.Equal(t, http.StatusOK, rec.Code, "запрос %d", i+1)
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		require.Equal(t, http.StatusFound, rec.Code, "запрос %d", i+1)
 	}
 
 	for _, header := range spoofHeaders {
 		t.Run(header, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.Header.Set(header, "203.0.113.99")
 
 			rec := httptest.NewRecorder()
@@ -280,12 +283,12 @@ func TestRateLimitSeparatesClients(t *testing.T) {
 
 	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
 
-	first := httptest.NewRequest(http.MethodGet, "/health", nil)
+	first := httptest.NewRequest(http.MethodGet, "/", nil)
 	first.RemoteAddr = "198.51.100.1:5000"
 
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, first)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusFound, rec.Code)
 
 	// Тот же адрес — лимит исчерпан.
 	rec = httptest.NewRecorder()
@@ -293,12 +296,12 @@ func TestRateLimitSeparatesClients(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 
 	// Другой адрес — своё ведро.
-	second := httptest.NewRequest(http.MethodGet, "/health", nil)
+	second := httptest.NewRequest(http.MethodGet, "/", nil)
 	second.RemoteAddr = "198.51.100.2:5000"
 
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, second)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusFound, rec.Code)
 }
 
 // Клиент с IPv6 управляет целой /64 и мог бы менять адрес на каждый запрос.
@@ -307,15 +310,15 @@ func TestRateLimitBucketsIPv6BySubnet(t *testing.T) {
 
 	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
 
-	first := httptest.NewRequest(http.MethodGet, "/health", nil)
+	first := httptest.NewRequest(http.MethodGet, "/", nil)
 	first.RemoteAddr = "[2001:db8:1:2::1]:5000"
 
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, first)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusFound, rec.Code)
 
 	// Другой адрес той же /64 — то же ведро.
-	second := httptest.NewRequest(http.MethodGet, "/health", nil)
+	second := httptest.NewRequest(http.MethodGet, "/", nil)
 	second.RemoteAddr = "[2001:db8:1:2::dead]:5000"
 
 	rec = httptest.NewRecorder()
@@ -342,8 +345,8 @@ func TestUploadRateLimitIsStricter(t *testing.T) {
 
 	// Чтение при этом ещё разрешено: лимиты раздельные.
 	read := httptest.NewRecorder()
-	router.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/health", nil))
-	assert.Equal(t, http.StatusOK, read.Code)
+	router.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusFound, read.Code)
 }
 
 // Веб-форма и REST — одна и та же дорогая операция, лимит у них общий,
@@ -389,4 +392,159 @@ func webMultipart(t *testing.T, userID string, content []byte) (string, *bytes.B
 	require.NoError(t, form.Close())
 
 	return form.FormDataContentType(), &body
+}
+
+// Метрики раскрывают внутреннее устройство сервиса, а публичный порт смотрит
+// наружу через Ingress. Снимать их положено со служебного слушателя.
+func TestMetricsAreNotOnPublicPort(t *testing.T) {
+	router, _ := newRouter(t, routerOpts{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// Живость не трогает зависимостей и стоит одного сравнения в памяти, поэтому
+// лимит на ней бесполезен: под наплывом трафика лимитер отвечал бы 429,
+// и внешний наблюдатель прочитал бы это как отказ живого сервиса.
+func TestLivenessBypassesRateLimit(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
+
+	exhaustLimit(t, router)
+
+	for range limit + 3 {
+		probe := httptest.NewRecorder()
+		router.ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/livez", nil))
+		assert.Equal(t, http.StatusOK, probe.Code)
+	}
+}
+
+// Готовность, наоборот, опрашивает базу, хранилище и брокер — три обращения
+// к инфраструктуре на запрос. Ingress маршрутизирует весь префикс, так что
+// без лимита этот путь стал бы самым дешёвым способом нагрузить зависимости
+// снаружи. Пробы оркестратора сюда не ходят: у них служебный порт.
+func TestReadinessIsRateLimitedOnPublicPort(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{rateLimitRPM: limit})
+
+	exhaustLimit(t, router)
+
+	for _, path := range []string{"/health", "/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+		})
+	}
+}
+
+// exhaustLimit выбирает лимит частоты обычными запросами.
+func exhaustLimit(t *testing.T, router http.Handler) {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+// За обратным прокси адрес соединения принадлежит самому прокси, один на всех.
+// Без разбора X-Forwarded-For лимит частоты стал бы общим ведром на весь поток.
+func TestRateLimitUsesForwardedHeaderBehindTrustedProxy(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{
+		rateLimitRPM:   limit,
+		trustedProxies: []string{"192.0.2.0/24"},
+	})
+
+	request := func(clientIP string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		// RemoteAddr у httptest.NewRequest — 192.0.2.1, он же доверенный прокси.
+		req.Header.Set("X-Forwarded-For", clientIP)
+
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, request("203.0.113.5"))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("203.0.113.5"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "тот же клиент — то же ведро")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("203.0.113.6"))
+	assert.Equal(t, http.StatusFound, rec.Code, "другой клиент за тем же прокси — своё ведро")
+}
+
+// Спецификация — часть контракта, и её адрес должен быть таким же стабильным,
+// как адреса самих методов: по нему ходят генераторы клиентов.
+func TestOpenAPISpecIsServed(t *testing.T) {
+	router, _ := newRouter(t, routerOpts{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/yaml")
+	assert.Contains(t, rec.Body.String(), "openapi: 3.1.0")
+	assert.Contains(t, rec.Body.String(), "/api/v1/avatars")
+}
+
+func TestDocsPageIsServed(t *testing.T) {
+	router, _ := newRouter(t, routerOpts{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "text/html")
+	// Файлы Swagger UI обязаны быть локальными: страница должна открываться
+	// в контуре без выхода наружу.
+	assert.Contains(t, rec.Body.String(), "/static/swagger/swagger-ui-bundle.js")
+	assert.NotContains(t, rec.Body.String(), "https://unpkg.com")
+	assert.NotContains(t, rec.Body.String(), "cdn.jsdelivr.net")
+}
+
+// Запрос мимо обратного прокси — проброс порта, прямое обращение к поду,
+// второй балансировщик без заголовка. ClientIPFromXFF читает только
+// X-Forwarded-For и при его отсутствии не ставит адрес вовсе: без запасного
+// пути ключ лимита оказался бы пустым, то есть общим на все такие запросы,
+// и один клиент закрывал бы загрузку всем остальным.
+func TestRateLimitFallsBackToRemoteAddrWithoutForwardedHeader(t *testing.T) {
+	const limit = 1
+
+	router, _ := newRouter(t, routerOpts{
+		rateLimitRPM:   limit,
+		trustedProxies: []string{"192.0.2.0/24"},
+	})
+
+	request := func(remoteAddr string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remoteAddr
+
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.1:5000"))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.1:5000"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "тот же адрес — то же ведро")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, request("198.51.100.2:5000"))
+	assert.Equal(t, http.StatusFound, rec.Code,
+		"другой адрес — своё ведро, а не общее на всех без заголовка")
 }

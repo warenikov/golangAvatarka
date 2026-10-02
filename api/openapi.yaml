@@ -1,0 +1,720 @@
+openapi: 3.1.0
+
+info:
+  title: GophProfile API
+  version: 0.3.0
+  summary: Сервис аватарок — загрузка один раз, отдача по HTTP куда угодно
+  description: |
+    Пользователь загружает фото один раз, сторонние платформы получают
+    аватарку обычным HTTP-запросом. Миниатюры собираются асинхронно:
+    сразу после загрузки `processing_status` равен `processing`, и запрос
+    миниатюры в этот момент отдаёт оригинал, а не ошибку — платформа
+    получает картинку всегда.
+
+    ### Чего здесь нет
+
+    Аутентификации. Пользователь определяется заголовком `X-User-ID`,
+    который никем не подтверждён. Это осознанное ограничение учебного
+    проекта, а не упущение: перед выходом наружу сервис нужно закрыть
+    настоящей проверкой личности.
+
+    ### Форматы
+
+    JPEG, PNG и WebP на загрузку — формат определяется по сигнатуре файла,
+    а не по расширению и не по `Content-Type` от клиента. Миниатюры всегда
+    отдаются в JPEG: энкодера WebP в pure Go не существует, а молча
+    принимать `format=jpeg` и возвращать PNG значило бы вводить клиента
+    в заблуждение. Поэтому параметр `format` отвергается с 400 при любом
+    значении.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск
+  - url: http://avatars.local
+    description: Локальный кластер Kubernetes
+
+tags:
+  - name: avatars
+    description: Загрузка, отдача и удаление аватарок
+  - name: users
+    description: Аватарка пользователя и история загрузок
+  - name: service
+    description: Проверки состояния
+
+paths:
+  /api/v1/avatars:
+    post:
+      tags: [avatars]
+      summary: Загрузить аватарку
+      operationId: uploadAvatar
+      description: |
+        Файл принимается в поле `file` или `image`. Два имени — не прихоть:
+        готовый фронт курса отправляет `image`, техническое задание описывает
+        `file`. При наличии обоих приоритет у `file`.
+
+        Ответ приходит до обработки: миниатюр ещё нет, их соберёт воркер.
+      parameters:
+        - $ref: '#/components/parameters/UserIDHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Файл изображения, до 10 МиБ
+                image:
+                  type: string
+                  format: binary
+                  description: То же поле под именем, которое шлёт фронт курса
+            encoding:
+              file:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '201':
+          description: Аватарка принята, обработка поставлена в очередь
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          description: Файл больше допустимого размера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TooLargeError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/avatars/{avatar_id}:
+    get:
+      tags: [avatars]
+      summary: Получить изображение
+      operationId: getAvatar
+      description: |
+        Отдаёт бинарные данные. Если запрошена миниатюра, которой ещё нет,
+        возвращается оригинал с кодом 200 — не 404 и не 202: клиенту нужна
+        картинка сейчас, а не обещание.
+
+        ETag считается по метаданным, поэтому условный запрос стоит одного
+        обращения к базе и не ходит в хранилище вовсе. В ключ входит
+        `updated_at`, так что после появления миниатюр старый ETag перестаёт
+        совпадать и клиент забирает свежее содержимое.
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageOK'
+        '304':
+          description: |
+            Содержимое не изменилось. Заголовок `If-None-Match` разбирается
+            по RFC 9110: понимаются `*`, список тегов через запятую и слабые
+            теги вида `W/"..."`.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [avatars]
+      summary: Удалить аватарку
+      operationId: deleteAvatar
+      description: |
+        Удаление мягкое: проставляется `deleted_at` и публикуется событие,
+        объекты из хранилища убирает воркер. Повторный запрос к уже удалённой
+        аватарке даёт 404, а не 204.
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+        - $ref: '#/components/parameters/UserIDHeader'
+      responses:
+        '204':
+          description: Удалена
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /api/v1/avatars/{avatar_id}/metadata:
+    get:
+      tags: [avatars]
+      summary: Метаданные аватарки
+      operationId: getAvatarMetadata
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+      responses:
+        '200':
+          description: Метаданные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvatarMetadata'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /api/v1/users/{user_id}/avatar:
+    get:
+      tags: [users]
+      summary: Текущая аватарка пользователя
+      operationId: getCurrentAvatar
+      description: |
+        Текущая — последняя неудалённая загрузка.
+
+        Пользователя без единой аватарки этот запрос не считает ошибкой:
+        вместо 404 отдаётся заглушка. В этом и смысл сервиса — сторонняя
+        платформа всегда получает картинку и не обрабатывает пустой случай.
+
+        Ответ с заглушкой помечен заголовком `X-Avatar-Fallback` и приходит
+        с `Cache-Control: no-cache`. Иначе клиент закешировал бы заглушку
+        на сутки и не увидел появившуюся аватарку.
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: Изображение аватарки или заглушки
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Avatar-Fallback:
+              description: Присутствует со значением `true`, если отдана заглушка
+              schema:
+                type: string
+                const: 'true'
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: Содержимое не изменилось
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [users]
+      summary: Удалить текущую аватарку пользователя
+      operationId: deleteCurrentAvatar
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/UserIDHeader'
+      responses:
+        '204':
+          description: Удалена
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /api/v1/users/{user_id}/avatars:
+    get:
+      tags: [users]
+      summary: Все аватарки пользователя
+      operationId: listUserAvatars
+      description: "Пустой список — тоже 200, с `count: 0`."
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Список метаданных
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvatarList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /health:
+    get:
+      tags: [service]
+      summary: Состояние компонентов
+      operationId: health
+      description: |
+        Синоним `/readyz`, оставленный ради совместимости: эндпоинт описан
+        в API с первого спринта.
+
+        Компоненты опрашиваются параллельно с общим таймаутом в две секунды.
+        Вне режима разработки причина отказа не раскрывается — текст ошибки
+        подключения выдал бы адреса и учётные записи инфраструктуры.
+      responses:
+        '200':
+          description: Все компоненты доступны
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Хотя бы один компонент недоступен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /livez:
+    get:
+      tags: [service]
+      summary: Жив ли процесс
+      operationId: livez
+      description: |
+        Проверяет только сам процесс и ничего больше. Состояние базы,
+        хранилища и брокера сюда намеренно не входит: проверку живости
+        оркестратор лечит перезапуском, а перезапуск не поднимет ни упавшую
+        базу, ни недоступный брокер — он лишь разом убьёт все реплики,
+        которые на самом деле исправны.
+
+        Доступен и на служебном порту 8081, куда и ходят пробы Kubernetes.
+      responses:
+        '200':
+          description: Процесс работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  /readyz:
+    get:
+      tags: [service]
+      summary: Готов ли принимать трафик
+      operationId: readyz
+      description: |
+        Проверяет зависимости: без базы и хранилища принимать запросы нечем.
+        Здесь отказ правильный — под убирают из балансировки, не перезапуская.
+
+        После получения сигнала остановки отвечает 503 со статусом `draining`
+        ещё до того, как сервер перестанет принимать соединения. Это закрывает
+        окно, в котором под уже завершается, но балансировщик всё ещё шлёт
+        в него запросы.
+      responses:
+        '200':
+          description: Готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Компонент недоступен либо процесс завершается
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/HealthResponse'
+                  - $ref: '#/components/schemas/StatusResponse'
+
+  /openapi.yaml:
+    get:
+      tags: [service]
+      summary: Эта спецификация
+      operationId: openapiSpec
+      responses:
+        '200':
+          description: Спецификация в формате YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  parameters:
+    UserIDHeader:
+      name: X-User-ID
+      in: header
+      required: true
+      description: |
+        Идентификатор пользователя. Никем не подтверждён — настоящей
+        аутентификации в сервисе нет.
+
+        Значение попадает в ключ объекта в хранилище, поэтому набор символов
+        ограничен: иначе идентификатор вида `../../etc` увёл бы запись
+        за пределы своего префикса.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[A-Za-z0-9._@-]+$'
+      example: user-42
+
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[A-Za-z0-9._@-]+$'
+      example: user-42
+
+    AvatarID:
+      name: avatar_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 8f14e45f-ea4f-4b1e-9b4d-2f9c1a3b5d7e
+
+    Size:
+      name: size
+      in: query
+      required: false
+      description: |
+        Размер изображения. Значение вне списка даёт 400 — молчаливая подмена
+        на ближайший размер скрыла бы от клиента опечатку.
+      schema:
+        type: string
+        enum: [original, 100x100, 300x300]
+        default: original
+
+    Format:
+      name: format
+      in: query
+      required: false
+      deprecated: true
+      description: |
+        Не поддерживается: любое значение даёт 400. Конвертации на лету нет,
+        и притворяться, что она есть, хуже честного отказа.
+      schema:
+        type: string
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: ETag из предыдущего ответа. Совпадение даёт 304.
+      schema:
+        type: string
+      example: '"a1b2c3d4e5f60718"'
+
+  headers:
+    ETag:
+      description: Считается по метаданным, включая `updated_at`
+      schema:
+        type: string
+    CacheControl:
+      description: |
+        `max-age=86400` для настоящей аватарки, `no-cache` для заглушки.
+      schema:
+        type: string
+
+  responses:
+    ImageOK:
+      description: Бинарные данные изображения
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        image/jpeg:
+          schema:
+            type: string
+            format: binary
+        image/png:
+          schema:
+            type: string
+            format: binary
+        image/webp:
+          schema:
+            type: string
+            format: binary
+
+    BadRequest:
+      description: |
+        Некорректный запрос: нет или невалиден `X-User-ID`, нет файла,
+        формат не распознан по сигнатуре, `avatar_id` не разбирается как UUID,
+        неизвестный `size` либо задан `format`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidFormat:
+              summary: Формат не распознан
+              value:
+                error: Invalid file format
+                details: 'Supported formats: jpeg, png, webp'
+            missingUser:
+              summary: Нет идентификатора пользователя
+              value:
+                error: Invalid user id
+
+    Forbidden:
+      description: Аватарка принадлежит другому пользователю
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Forbidden
+            details: You can only delete your own avatars
+
+    NotFound:
+      description: Аватарка не найдена или уже удалена
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Avatar not found
+
+    TooManyRequests:
+      description: |
+        Превышен лимит частоты. У загрузки лимит отдельный и более строгий:
+        она дороже чтения — десять мегабайт тела, запись в хранилище
+        и работа воркера.
+      headers:
+        Retry-After:
+          description: Через сколько секунд повторять
+          schema:
+            type: integer
+        X-RateLimit-Limit:
+          description: Лимит запросов в минуту
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Too many requests
+            details: Limit is 300 requests per minute
+
+    Unavailable:
+      description: |
+        Хранилище, база или брокер недоступны, и автоматический выключатель
+        отклоняет обращения к ним, не дожидаясь таймаута. Запрос стоит повторить
+        через указанное в `Retry-After` время.
+      headers:
+        Retry-After:
+          description: Через сколько секунд повторять
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Service temporarily unavailable
+
+    InternalError:
+      description: Внутренняя ошибка
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Internal error
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Короткое описание
+        details:
+          type: string
+          description: Подробности, если они безопасны для клиента
+
+    TooLargeError:
+      type: object
+      required: [error, max_size]
+      properties:
+        error:
+          type: string
+          const: File too large
+        max_size:
+          type: integer
+          description: Предел в байтах
+          example: 10485760
+
+    UploadResponse:
+      type: object
+      required: [id, user_id, url, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        url:
+          type: string
+          description: Относительный адрес изображения
+        status:
+          type: string
+          const: processing
+          description: Миниатюр ещё нет, их соберёт воркер
+        created_at:
+          type: string
+          format: date-time
+
+    Dimensions:
+      type: object
+      required: [width, height]
+      properties:
+        width:
+          type: integer
+        height:
+          type: integer
+
+    Thumbnail:
+      type: object
+      required: [size, url]
+      properties:
+        size:
+          type: string
+          enum: [100x100, 300x300]
+        url:
+          type: string
+
+    AvatarMetadata:
+      type: object
+      required:
+        [id, user_id, file_name, mime_type, size, dimensions, thumbnails, processing_status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        file_name:
+          type: string
+        mime_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        size:
+          type: integer
+          description: Размер оригинала в байтах
+        dimensions:
+          $ref: '#/components/schemas/Dimensions'
+        thumbnails:
+          type: array
+          description: Пуст, пока `processing_status` не стал `completed`
+          items:
+            $ref: '#/components/schemas/Thumbnail'
+        processing_status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AvatarList:
+      type: object
+      required: [user_id, count, avatars]
+      properties:
+        user_id:
+          type: string
+        count:
+          type: integer
+        avatars:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvatarMetadata'
+
+    ComponentHealth:
+      type: object
+      required: [status, latency_ms]
+      properties:
+        status:
+          type: string
+          enum: [ok, down]
+        latency_ms:
+          type: integer
+        error:
+          type: string
+          description: |
+            Присутствует только у отказавшего компонента. Вне режима
+            разработки — обезличенное `component unavailable`.
+
+    HealthResponse:
+      type: object
+      required: [status, components, version, uptime_s]
+      properties:
+        status:
+          type: string
+          enum: [ok, down]
+        components:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ComponentHealth'
+        version:
+          type: string
+        uptime_s:
+          type: integer
+
+    StatusResponse:
+      type: object
+      required: [status, version, uptime_s]
+      description: Ответ без опроса компонентов — живость и режим слива
+      properties:
+        status:
+          type: string
+          enum: [ok, draining]
+        version:
+          type: string
+        uptime_s:
+          type: integer

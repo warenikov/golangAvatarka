@@ -27,6 +27,17 @@ groups:
           summary: "Более 5% ответов — 5xx"
           description: "Доля серверных ошибок держится выше 5% пять минут подряд."
 
+      - alert: CircuitOpen
+        expr: max by (job, dependency) (circuit_breaker_state) == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }}: разомкнут выключатель {{ $labels.dependency }}"
+          description: >-
+            Обращения к {{ $labels.dependency }} отклоняются дольше минуты:
+            зависимость недоступна или отвечает ошибками.
+
   - name: gophprofile-processing
     rules:
       # Отставание важнее скорости: пользователь видит оригинал вместо

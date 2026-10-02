@@ -1,0 +1,41 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- range $component := list "server" "worker" }}
+---
+# Цель для Prometheus Operator. Статических целей в кластере быть не может:
+# поды переезжают и меняют адреса при каждом выкате и каждом решении HPA.
+# Оператор следит за endpoints Service и переписывает конфигурацию сам.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gophprofile.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+    {{- with $.Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  endpoints:
+    # Порт задаётся именем, а не номером: у сервера на 8080 висит публичный API,
+    # и промах по порту означал бы сбор метрик через тот же вход, который
+    # смотрит наружу.
+    - port: metrics
+      path: /metrics
+      interval: {{ $.Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ $.Values.monitoring.serviceMonitor.scrapeTimeout }}
+      scheme: http
+      relabelings:
+        # Имя пода в метке: без него все реплики сливаются в одну кривую,
+        # и понять, что отказала конкретная из них, невозможно.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - targetLabel: component
+          replacement: {{ $component }}
+{{- end }}
+{{- end }}

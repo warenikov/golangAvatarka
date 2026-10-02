@@ -13,3 +13,9 @@ var TemplatesFS embed.FS
 
 //go:embed static/default-avatar.png
 var DefaultAvatar []byte
+
+// SwaggerPage — страница просмотра спецификации. Сами файлы Swagger UI
+// лежат в static/swagger и отдаются обычным файловым обработчиком.
+//
+//go:embed static/swagger/index.html
+var SwaggerPage []byte
