@@ -241,7 +241,14 @@ func run() error {
 	if cfg.App.DrainDelay > 0 {
 		log.Info("готовность отключена, ждём вывода из балансировки",
 			"delay", cfg.App.DrainDelay.String())
-		time.Sleep(cfg.App.DrainDelay)
+
+		// Повторный сигнал прерывает паузу: первый уже снят с перехвата,
+		// и без этого второй Ctrl+C убил бы процесс, минуя мягкую остановку.
+		drainCtx, stopDrain := signal.NotifyContext(adminCtx, os.Interrupt, syscall.SIGTERM)
+		if !waitDrain(drainCtx, cfg.App.DrainDelay) {
+			log.Warn("пауза слива прервана, останавливаемся сразу")
+		}
+		stopDrain()
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.App.ShutdownTimeout)
@@ -256,4 +263,17 @@ func run() error {
 	log.Info("сервер остановлен")
 
 	return nil
+}
+
+// waitDrain ждёт паузу слива d или отмены ctx. Возвращает false, если ожидание прервано.
+func waitDrain(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
