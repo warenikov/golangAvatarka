@@ -32,3 +32,29 @@ jobs:
           # Та же версия, что стоит локально: иначе новые проверки нового релиза
           # ломают ранее зелёную ветку без единого изменения в коде.
           version: v2.10.1
+
+  helm:
+    name: Helm-чарт
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Та же версия, что локально: вывод helm template между релизами
+      # различается, и проверка ниже ловила бы разницу версий, а не правок.
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.0
+
+      - name: helm lint и template на всех наборах values
+        run: make k8s-lint
+
+      # Плоские манифесты в deploy/k8s/rendered — для чтения и применения
+      # без Helm. Источник истины — чарт, и правка шаблона без
+      # `make k8s-render` молча развела бы их. Проверка заодно ловит
+      # копию дашборда, разошедшуюся с docker/observability.
+      - name: Отрендеренные манифесты совпадают с чартом
+        run: |
+          make k8s-render
+          git status --porcelain -- deploy/
+          git diff --exit-code -- deploy/
+          test -z "$(git status --porcelain --untracked-files=all -- deploy/)"
