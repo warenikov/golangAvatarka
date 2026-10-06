@@ -1,0 +1,208 @@
+{{- if .Values.networkPolicy.enabled }}
+# Сетевые политики неймспейса.
+#
+# Логика построена от запрета: первая политика закрывает весь вход и выход,
+# остальные добавляют точечные разрешения. Политики складываются объединением,
+# запрещающих правил в NetworkPolicy не бывает — «запретить всё, кроме»
+# выражается только так.
+#
+# Самая частая ошибка в этом месте — забыть исход на DNS. Под с закрытым egress
+# не резолвит ни одно имя, и отказ выглядит как «база недоступна», хотя сеть
+# до базы открыта: приложение просто не может превратить имя Service в адрес.
+#
+# ВАЖНО: энфорсинг обеспечивает CNI, а не сам Kubernetes. Kubernetes из OrbStack
+# (k3s) объекты принимает, но трафик не фильтрует — проверено. Локально
+# проверяется только применение манифестов; настоящая блокировка требует
+# кластера с Calico или Cilium.
+#
+# Отсюда же вытекает то, что здесь нельзя проверить: пробы приходят от kubelet,
+# то есть с адреса узла, и ни один namespaceSelector их не покрывает. Часть CNI
+# пропускает трафик узла к подам по умолчанию, часть — нет, и во втором случае
+# все пробы начнут падать разом, а поды не поднимутся вовсе. Перед включением
+# политик на боевом кластере это надо сверить с документацией его CNI и при
+# необходимости добавить в networkPolicy.extraIngress правило с ipBlock
+# на подсеть узлов.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+spec:
+  # Пустой podSelector — все поды неймспейса, включая зависимости.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        # UDP — обычный путь. TCP нужен для ответов, не помещающихся в дейтаграмму:
+        # резолвер переспрашивает по TCP, и без этого порта часть запросов
+        # молча отваливается по таймауту.
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "server") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+{{- with .Values.networkPolicy.extraIngress }}
+    # Дополнительные источники входа: подсеть узлов, если CNI подчиняет
+    # политикам трафик kubelet, или сторонний сборщик метрик.
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+    # Публичный порт открыт только контроллеру входа. Это не только про доступ:
+    # на этом и держится доверие к X-Forwarded-For. Если бы до пода был путь
+    # в обход контроллера, заголовок подделал бы кто угодно и получил бы
+    # свежее ведро лимита частоты на каждый запрос.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Служебный порт — только Prometheus. Наружу он не выходит вовсе.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Воркер не принимает пользовательского трафика вовсе. Единственный вход —
+    # сбор метрик.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-app-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+spec:
+  # Сервер, воркер и джоб миграций ходят в одни и те же места.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [server, worker, migrate]
+  policyTypes:
+    - Egress
+  egress:
+{{- if or .Values.postgresql.enabled .Values.minio.enabled .Values.rabbitmq.enabled }}
+    # Встроенные зависимости живут в этом же неймспейсе и адресуются
+    # по лейблам, а не по адресам: адреса подов меняются при каждом рестарте.
+  {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "postgresql") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+  {{- end }}
+  {{- if .Values.minio.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "minio") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9000
+  {{- end }}
+  {{- if .Values.rabbitmq.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "rabbitmq") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5672
+  {{- end }}
+{{- end }}
+{{- with .Values.networkPolicy.extraEgress }}
+    # Внешние зависимости: управляемая база, S3 за пределами кластера,
+    # приёмник трейсов. Каждая открывается явным правилом — общего
+    # «выход в интернет» здесь нет намеренно.
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+{{- if or .Values.postgresql.enabled .Values.minio.enabled .Values.rabbitmq.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-deps-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+spec:
+  # Зависимости принимают только от приложения этого же релиза. Ни другой
+  # неймспейс, ни чужой под в этом неймспейсе до них не достучится.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [postgresql, minio, rabbitmq]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [server, worker, migrate]
+{{- end }}
+{{- end }}

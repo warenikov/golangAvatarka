@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+# Всё, что не является секретом. Конфигурация сервиса целиком лежит
+# в переменных окружения и проверяется на старте, поэтому ConfigMap
+# подключается через envFrom — перечислять то же самое в env было бы
+# вторым местом, где список переменных расходится с кодом.
+data:
+  APP_ENV: {{ .Values.app.env | quote }}
+  APP_LOG_LEVEL: {{ .Values.app.logLevel | quote }}
+  APP_VERSION: {{ .Chart.AppVersion | quote }}
+  APP_HTTP_ADDR: ":8080"
+  APP_ADMIN_ADDR: ":8081"
+  APP_REQUEST_TIMEOUT: {{ .Values.app.requestTimeout | quote }}
+  APP_SHUTDOWN_TIMEOUT: {{ .Values.app.shutdownTimeout | quote }}
+  APP_DRAIN_DELAY: {{ .Values.app.drainDelay | quote }}
+  # Схему накатывает Job-хук до выката подов. Реплика, меняющая схему
+  # при старте, — гонка тем вероятнее, чем больше реплик.
+  APP_AUTO_MIGRATE: "false"
+  # int64 обязателен: Helm разбирает числа из values как float64, и 10485760
+  # доезжает до контейнера строкой "1.048576e+07", которую конфиг не принимает.
+  APP_MAX_UPLOAD_BYTES: {{ .Values.app.maxUploadBytes | int64 | quote }}
+  APP_MAX_IMAGE_PIXELS: {{ .Values.app.maxImagePixels | int64 | quote }}
+  APP_ALLOWED_MIME: {{ .Values.app.allowedMIME | quote }}
+  APP_CORS_ORIGINS: {{ required "app.corsOrigins обязателен: пустой список конфигурация не принимает" .Values.app.corsOrigins | quote }}
+  APP_RATE_LIMIT_RPM: {{ .Values.app.rateLimitRPM | int64 | quote }}
+  APP_RATE_LIMIT_UPLOAD_RPM: {{ .Values.app.rateLimitUploadRPM | int64 | quote }}
+  APP_TRUSTED_PROXY_CIDRS: {{ .Values.app.trustedProxyCIDRs | quote }}
+
+  DB_HOST: {{ include "gophprofile.dbHost" . | quote }}
+  DB_PORT: {{ ternary 5432 (.Values.database.port | int) .Values.postgresql.enabled | quote }}
+  DB_USER: {{ .Values.database.user | quote }}
+  DB_NAME: {{ .Values.database.name | quote }}
+  # Внутри кластера трафик до встроенной базы не выходит за пределы неймспейса,
+  # и TLS там нечем терминировать. Внешняя база — только по require.
+  DB_SSLMODE: {{ ternary "disable" .Values.database.sslMode .Values.postgresql.enabled | quote }}
+  DB_MAX_CONNS: {{ .Values.database.maxConns | int64 | quote }}
+  DB_MIN_CONNS: {{ .Values.database.minConns | int64 | quote }}
+
+  S3_ENDPOINT: {{ include "gophprofile.s3Endpoint" . | quote }}
+  S3_BUCKET: {{ .Values.s3.bucket | quote }}
+  S3_REGION: {{ .Values.s3.region | quote }}
+  S3_USE_SSL: {{ ternary false .Values.s3.useSSL .Values.minio.enabled | quote }}
+
+  RABBITMQ_EXCHANGE: {{ .Values.rabbitmq.exchange | quote }}
+  RABBITMQ_QUEUE_PROCESS: {{ .Values.rabbitmq.queues.process | quote }}
+  RABBITMQ_QUEUE_DELETE: {{ .Values.rabbitmq.queues.delete | quote }}
+  RABBITMQ_QUEUE_RETRY: {{ .Values.rabbitmq.queues.retry | quote }}
+  RABBITMQ_QUEUE_DEAD: {{ .Values.rabbitmq.queues.dead | quote }}
+  RABBITMQ_RETRY_TTL: {{ .Values.rabbitmq.retryTTL | quote }}
+  RABBITMQ_MAX_RETRIES: {{ .Values.rabbitmq.maxRetries | int64 | quote }}
+  RABBITMQ_PREFETCH: {{ .Values.rabbitmq.prefetch | int64 | quote }}
+
+  WORKER_ADMIN_ADDR: ":8081"
+  WORKER_RECONCILE_INTERVAL: {{ .Values.worker.reconcileInterval | quote }}
+  WORKER_RECONCILE_AGE: {{ .Values.worker.reconcileAge | quote }}
+
+  BREAKER_FAILURE_THRESHOLD: {{ .Values.app.breaker.failureThreshold | int64 | quote }}
+  BREAKER_OPEN_TIMEOUT: {{ .Values.app.breaker.openTimeout | quote }}
+  BREAKER_HALF_OPEN_REQUESTS: {{ .Values.app.breaker.halfOpenRequests | int64 | quote }}
+
+  TRACING_ENABLED: {{ .Values.tracing.enabled | quote }}
+  TRACING_ENDPOINT: {{ .Values.tracing.endpoint | quote }}
+  TRACING_SAMPLE_RATIO: {{ .Values.tracing.sampleRatio | quote }}

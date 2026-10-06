@@ -44,12 +44,18 @@ func TestAdminServerServesMetricsAndHealth(t *testing.T) {
 	require.NoError(t, err)
 	business.AvatarDeleted()
 
-	health := func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	routes := observability.AdminRoutes{
+		Live: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		},
+		Ready: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","components":{}}`))
+		},
 	}
 
-	srv := observability.NewServer(addr, reg, health, discard())
+	srv := observability.NewServer(addr, reg, routes, discard())
 	assert.Equal(t, addr, srv.Addr())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -68,9 +74,20 @@ func TestAdminServerServesMetricsAndHealth(t *testing.T) {
 		assert.Contains(t, body, "avatar_deleted_total")
 	})
 
-	t.Run("состояние", func(t *testing.T) {
-		body := get(t, base+"/health")
+	t.Run("живость", func(t *testing.T) {
+		body := get(t, base+"/livez")
 		assert.Contains(t, body, `"status":"ok"`)
+	})
+
+	t.Run("готовность", func(t *testing.T) {
+		body := get(t, base+"/readyz")
+		assert.Contains(t, body, `"components"`)
+	})
+
+	// /health описан в API с первого спринта и остаётся синонимом готовности.
+	t.Run("старое имя готовности", func(t *testing.T) {
+		body := get(t, base+"/health")
+		assert.Contains(t, body, `"components"`)
 	})
 
 	cancel()
@@ -87,7 +104,7 @@ func TestAdminServerServesMetricsAndHealth(t *testing.T) {
 func TestAdminServerWithoutHealthHandler(t *testing.T) {
 	addr := freePort(t)
 
-	srv := observability.NewServer(addr, prometheus.NewRegistry(), nil, discard())
+	srv := observability.NewServer(addr, prometheus.NewRegistry(), observability.AdminRoutes{}, discard())
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

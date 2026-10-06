@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
@@ -27,6 +28,8 @@ const (
 	readTimeout       = 60 * time.Second
 	writeTimeout      = 60 * time.Second
 	idleTimeout       = 120 * time.Second
+
+	healthTimeout = 2 * time.Second
 )
 
 func main() {
@@ -141,9 +144,18 @@ func run() error {
 		return fmt.Errorf("http metrics: %w", err)
 	}
 
-	publisher = publisher.WithMetrics(businessMetrics)
+	breakerMetrics, err := observability.NewBreakers(registry)
+	if err != nil {
+		return fmt.Errorf("breaker metrics: %w", err)
+	}
 
-	repo := postgres.NewAvatarRepository(pool)
+	storage = storage.WithBreaker(breakerMetrics.NewBreaker("s3", cfg.Breaker))
+	publisher = publisher.WithMetrics(businessMetrics).
+		WithBreaker(breakerMetrics.NewBreaker("rabbitmq", cfg.Breaker))
+
+	repo := postgres.NewAvatarRepository(pool).
+		WithBreaker(breakerMetrics.NewBreaker("postgres", cfg.Breaker,
+			breaker.WithHealthyErrors(postgres.IsDataError)))
 	avatarSvc := services.NewAvatarService(repo, storage, publisher, log,
 		services.WithMetrics(businessMetrics))
 
@@ -151,20 +163,47 @@ func run() error {
 	uploadLimiter := rest.UploadRateLimiter(log.With("component", "ratelimit"), cfg.App.RateLimitUpload)
 	webHandler := webui.NewHandler(avatarSvc, cfg, log.With("component", "web"), uploadLimiter)
 
+	// Причина отказа компонента раскрывается только вне прода: текст ошибки
+	// подключения выдаёт адреса и учётные записи инфраструктуры.
+	health := rest.NewHealthHandler(log.With("component", "health"), cfg.App.Version,
+		healthTimeout, !cfg.IsProd(),
+		postgres.NewHealthChecker(pool),
+		s3.NewHealthChecker(storage),
+		rabbitmq.NewHealthChecker(conn),
+	)
+
 	router := rest.NewRouter(rest.RouterDeps{
 		Config:        cfg,
 		Log:           log,
 		Metrics:       httpMetrics,
-		Registry:      registry,
 		Avatars:       rest.NewAvatarHandler(avatarSvc, cfg, log.With("component", "http")),
 		Web:           webHandler,
+		Health:        health,
 		UploadLimiter: uploadLimiter,
-		Checkers: []rest.Checker{
-			postgres.NewHealthChecker(pool),
-			s3.NewHealthChecker(storage),
-			rabbitmq.NewHealthChecker(conn),
-		},
 	})
+
+	// Служебный слушатель переживает остановку основного: пока под сливает
+	// соединения, оркестратор продолжает опрашивать готовность, и ответ
+	// «сливаюсь» должен доходить. Контекст без отмены родителем — сигнал
+	// гасит основной сервер, а не этот.
+	adminCtx, stopAdmin := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopAdmin()
+
+	admin := observability.NewServer(cfg.App.AdminAddr, registry,
+		observability.AdminRoutes{Live: health.Live, Ready: health.Ready},
+		log.With("component", "admin"))
+
+	// Отказ служебного слушателя для сервера фатален, в отличие от воркера.
+	// На этом порту живут все три пробы: не заняв его, процесс продолжил бы
+	// обслуживать API, но выглядел бы для оркестратора не запустившимся —
+	// и был бы убит стартовой проверкой с причиной, спрятанной в одной
+	// строке лога. Лучше упасть сразу и с понятной ошибкой.
+	adminErr := make(chan error, 1)
+	go func() {
+		if runErr := admin.Run(adminCtx); runErr != nil {
+			adminErr <- runErr
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.App.HTTPAddr,
@@ -186,9 +225,30 @@ func run() error {
 	select {
 	case listenErr := <-serverErr:
 		return fmt.Errorf("listen: %w", listenErr)
+	case listenErr := <-adminErr:
+		return fmt.Errorf("admin listen: %w", listenErr)
 	case <-ctx.Done():
 		stop()
 		log.Info("получен сигнал, останавливаем сервер", "timeout", cfg.App.ShutdownTimeout.String())
+	}
+
+	// Сначала отказ готовности, и только потом остановка приёма соединений.
+	// В Kubernetes удаление пода из endpoints идёт параллельно с доставкой
+	// сигнала, и без паузы часть запросов успевает прийти в процесс, который
+	// уже закрыл слушатель, — клиент получает разрыв вместо ответа.
+	health.Drain()
+
+	if cfg.App.DrainDelay > 0 {
+		log.Info("готовность отключена, ждём вывода из балансировки",
+			"delay", cfg.App.DrainDelay.String())
+
+		// Повторный сигнал прерывает паузу: первый уже снят с перехвата,
+		// и без этого второй Ctrl+C убил бы процесс, минуя мягкую остановку.
+		drainCtx, stopDrain := signal.NotifyContext(adminCtx, os.Interrupt, syscall.SIGTERM)
+		if !waitDrain(drainCtx, cfg.App.DrainDelay) {
+			log.Warn("пауза слива прервана, останавливаемся сразу")
+		}
+		stopDrain()
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.App.ShutdownTimeout)
@@ -198,7 +258,22 @@ func run() error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 
+	stopAdmin()
+
 	log.Info("сервер остановлен")
 
 	return nil
+}
+
+// waitDrain ждёт паузу слива d или отмены ctx. Возвращает false, если ожидание прервано.
+func waitDrain(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

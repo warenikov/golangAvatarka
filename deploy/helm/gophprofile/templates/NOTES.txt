@@ -1,0 +1,40 @@
+{{ .Chart.Name }} {{ .Chart.Version }} развёрнут в неймспейсе {{ .Release.Namespace }}.
+
+Образ:      {{ include "gophprofile.image" . }}
+Окружение:  {{ .Values.app.env }}
+Сервер:     {{ if .Values.autoscaling.server.enabled }}HPA {{ .Values.autoscaling.server.minReplicas }}–{{ .Values.autoscaling.server.maxReplicas }} реплик{{ else }}{{ .Values.server.replicaCount }} реплик{{ end }}
+Воркер:     {{ if .Values.autoscaling.worker.enabled }}HPA {{ .Values.autoscaling.worker.minReplicas }}–{{ .Values.autoscaling.worker.maxReplicas }} реплик{{ else }}{{ .Values.worker.replicaCount }} реплик{{ end }}
+
+Состояние выката:
+
+  kubectl -n {{ .Release.Namespace }} get pods,hpa,ingress
+
+{{ if .Values.ingress.enabled -}}
+Сервис доступен на http://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+
+Если имя не резолвится, добавьте его в /etc/hosts, взяв адрес контроллера:
+
+  kubectl -n {{ .Values.networkPolicy.ingressNamespace }} get svc -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
+
+{{- else -}}
+Ingress выключен. Проброс порта для проверки:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gophprofile.fullname" . }}-server {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+Метрики и пробы живут на служебном порту {{ .Values.service.metricsPort }} и наружу не выходят:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gophprofile.fullname" . }}-server {{ .Values.service.metricsPort }}:{{ .Values.service.metricsPort }}
+  curl -s localhost:{{ .Values.service.metricsPort }}/readyz
+
+{{ if .Values.secrets.existingSecret -}}
+Секреты берутся из готового Secret {{ .Values.secrets.existingSecret }} — в values паролей нет.
+{{- else -}}
+ВНИМАНИЕ: секреты заданы через values и попали в историю релизов Helm.
+Для продакшена заведите Secret снаружи чарта и укажите secrets.existingSecret.
+{{- end }}
+
+{{ if not .Values.networkPolicy.enabled -}}
+ВНИМАНИЕ: сетевые политики выключены — до подов есть путь в обход ingress-контроллера,
+и заголовок X-Forwarded-For перестаёт быть доверенным.
+{{- end }}

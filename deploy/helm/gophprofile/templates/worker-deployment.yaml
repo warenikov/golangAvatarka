@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.worker.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 8 }}
+        {{- with .Values.worker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "gophprofile.podSecurityContext" . | nindent 8 }}
+      # Воркер не принимает запросов, но держит взятое из очереди сообщение
+      # до подтверждения. Времени должно хватить дообработать текущую задачу,
+      # иначе она уедет в повторную доставку и миниатюра соберётся дважды.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "gophprofile.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # В образе три бинаря и точка входа сервера. Воркеру нужна своя.
+          command: ["/usr/local/bin/worker"]
+          securityContext:
+            {{- include "gophprofile.containerSecurityContext" . | nindent 12 }}
+          ports:
+            # Публичного порта у воркера нет вовсе: он потребитель очереди.
+            # Служебный нужен — половина бизнес-метрик живёт именно здесь.
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.configMapName" . }}
+          env:
+            {{- include "gophprofile.secretEnv" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: {{ .Values.worker.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.worker.probes.startup.failureThreshold }}
+          # Проверка нужна не балансировщику, а оркестратору: без неё зависший
+          # на мёртвом соединении процесс выглядит живым, а очередь молча копится.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: {{ .Values.worker.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.worker.probes.liveness.failureThreshold }}
+          # Готовность воркера не управляет трафиком — Service на него не смотрит.
+          # Она нужна выкату: без неё обновление считалось бы успешным раньше,
+          # чем новый под вообще подключился к брокеру.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: {{ .Values.worker.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.worker.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "gophprofile.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "gophprofile.tmpVolume" . | nindent 8 }}

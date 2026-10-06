@@ -7,4 +7,5 @@ var (
 	ErrForbidden      = errors.New("forbidden")
 	ErrInvalidFormat  = errors.New("invalid file format")
 	ErrTooLarge       = errors.New("file too large")
+	ErrUnavailable    = errors.New("dependency unavailable")
 )

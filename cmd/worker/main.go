@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
+	"go-avatar-service/internal/breaker"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/handlers/rest"
@@ -109,13 +109,23 @@ func run() error {
 		return fmt.Errorf("business metrics: %w", err)
 	}
 
+	breakerMetrics, err := observability.NewBreakers(registry)
+	if err != nil {
+		return fmt.Errorf("breaker metrics: %w", err)
+	}
+
+	storage = storage.WithBreaker(breakerMetrics.NewBreaker("s3", cfg.Breaker))
+
 	publisher, err := rabbitmq.NewPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: %w", err)
 	}
-	publisher = publisher.WithMetrics(metrics)
+	publisher = publisher.WithMetrics(metrics).
+		WithBreaker(breakerMetrics.NewBreaker("rabbitmq", cfg.Breaker))
 
-	repo := postgres.NewAvatarRepository(pool)
+	repo := postgres.NewAvatarRepository(pool).
+		WithBreaker(breakerMetrics.NewBreaker("postgres", cfg.Breaker,
+			breaker.WithHealthyErrors(postgres.IsDataError)))
 	processor := worker.NewProcessor(repo, storage, cfg.App.MaxImagePixels, log,
 		worker.WithMetrics(metrics))
 	reconciler := worker.NewReconciler(repo, publisher,
@@ -149,10 +159,16 @@ func run() error {
 	group.Go(func() error { return reconciler.Run(groupCtx) })
 
 	// Служебный сервер: без него метрики воркера снять неоткуда.
+	health := workerHealth(cfg, log.With("component", "health"), pool, storage, conn)
 	admin := observability.NewServer(cfg.Worker.AdminAddr, registry,
-		workerHealth(cfg, log.With("component", "health"), pool, storage, conn), log)
+		observability.AdminRoutes{Live: health.Live, Ready: health.Ready}, log)
 	group.Go(func() error {
-		admin.Run(groupCtx)
+		// Отказ намеренно не уводит группу: воркер без метрик продолжает
+		// разбирать очередь, и ронять его из-за служебного порта было бы
+		// хуже, чем остаться без графиков.
+		if adminErr := admin.Run(groupCtx); adminErr != nil {
+			log.ErrorContext(groupCtx, "служебный сервер воркера остановлен", "err", adminErr)
+		}
 
 		return nil
 	})
@@ -168,15 +184,17 @@ func run() error {
 	return nil
 }
 
-// workerHealth отвечает на проверку живости воркера состоянием его зависимостей.
+// workerHealth собирает обработчик проверок состояния воркера.
 //
 // Воркер не принимает трафик, поэтому проверка нужна не балансировщику,
 // а оркестратору: без неё зависший на мёртвом соединении процесс выглядит
-// живым и очередь молча копится.
+// живым и очередь молча копится. Отсюда и разделение проверок — готовность
+// смотрит на зависимости, живость только на сам процесс: перезапуск воркера
+// не поднимет ни упавшую базу, ни недоступный брокер.
 func workerHealth(
 	cfg *config.Config, log *slog.Logger,
 	pool *pgxpool.Pool, storage *s3.Storage, conn *rabbitmq.Connection,
-) http.HandlerFunc {
+) *rest.HealthHandler {
 	checkers := []rest.Checker{
 		postgres.NewHealthChecker(pool),
 		s3.NewHealthChecker(storage),
@@ -187,7 +205,5 @@ func workerHealth(
 	// без уровня из конфига и без trace_id, и такие строки не проходят разбор
 	// в конвейере логов — диагностика воркера просто не доезжала бы до OpenSearch.
 	// Причина отказа раскрывается по тому же правилу, что и у сервера.
-	handler := rest.NewHealthHandler(log, cfg.App.Version, healthTimeout, !cfg.IsProd(), checkers...)
-
-	return handler.Handle
+	return rest.NewHealthHandler(log, cfg.App.Version, healthTimeout, !cfg.IsProd(), checkers...)
 }

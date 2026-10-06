@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -17,23 +18,39 @@ const (
 	serverWriteTimeout      = 30 * time.Second
 )
 
-// Server — служебный HTTP-сервер для процессов без собственного API.
+// AdminRoutes — обработчики проверок состояния для служебного сервера.
+// Пустое поле означает, что маршрут не регистрируется.
+type AdminRoutes struct {
+	Live  http.HandlerFunc
+	Ready http.HandlerFunc
+}
+
+// Server — служебный HTTP-сервер: метрики и проверки состояния.
 //
-// Воркер до сих пор не отдавал ни метрик, ни состояния: половина показателей
-// сервиса — обработка миниатюр, ретраи, отставание очереди — живёт именно
-// в нём, и снять их было неоткуда.
+// Его слушают оба процесса, но по разным причинам. Воркер не имеет своего API,
+// и снять с него метрики было бы неоткуда. У сервера API есть, но держать
+// на нём /metrics нельзя: публичный порт смотрит наружу через Ingress,
+// а в метках метрик лежит внутреннее устройство сервиса.
 type Server struct {
 	srv *http.Server
 	log *slog.Logger
 }
 
-// NewServer собирает сервер с /metrics и /health.
-func NewServer(addr string, reg *prometheus.Registry, health http.HandlerFunc, log *slog.Logger) *Server {
+// NewServer собирает сервер с /metrics, /livez и /readyz.
+//
+// /health остаётся синонимом готовности: эндпоинт описан в API с первого
+// спринта, и ломать его ради переименования незачем.
+func NewServer(addr string, reg *prometheus.Registry, routes AdminRoutes, log *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
-	if health != nil {
-		mux.HandleFunc("GET /health", health)
+	if routes.Live != nil {
+		mux.HandleFunc("GET /livez", routes.Live)
+	}
+
+	if routes.Ready != nil {
+		mux.HandleFunc("GET /readyz", routes.Ready)
+		mux.HandleFunc("GET /health", routes.Ready)
 	}
 
 	return &Server{
@@ -48,11 +65,13 @@ func NewServer(addr string, reg *prometheus.Registry, health http.HandlerFunc, l
 	}
 }
 
-// Run держит сервер до отмены контекста.
+// Run держит сервер до отмены контекста и возвращает ошибку прослушивания.
 //
-// Отказ служебного сервера не должен ронять процесс: без метрик воркер
-// работает хуже наблюдаемым, но продолжает обрабатывать очередь.
-func (s *Server) Run(ctx context.Context) {
+// Как поступить с отказом, решает вызывающий, и решение у процессов разное.
+// Воркер без метрик продолжает разбирать очередь — он просто хуже наблюдаем.
+// Сервер без служебного порта теряет пробы: оркестратор не может выяснить,
+// жив ли он, и убивает под по стартовой проверке, хотя API работает.
+func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 
@@ -67,8 +86,10 @@ func (s *Server) Run(ctx context.Context) {
 	s.log.InfoContext(ctx, "служебный сервер запущен", "addr", s.srv.Addr)
 
 	if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		s.log.ErrorContext(ctx, "служебный сервер недоступен", "err", err)
+		return fmt.Errorf("служебный сервер недоступен: %w", err)
 	}
+
+	return nil
 }
 
 // Addr возвращает адрес прослушивания — пригодно для логов и тестов.

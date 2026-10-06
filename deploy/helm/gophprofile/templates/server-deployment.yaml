@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gophprofile.componentLabels" (dict "root" . "component" "server") | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.server.enabled }}
+  # Поле опущено, когда включён HPA: иначе каждое helm upgrade возвращало бы
+  # число реплик к значению из values, отменяя уже принятое автомасштабированием
+  # решение — под нагрузкой это выглядит как внезапное падение ёмкости.
+  replicas: {{ .Values.server.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.componentSelectorLabels" (dict "root" . "component" "server") | nindent 8 }}
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Без контрольных сумм правка конфигурации не доходит до работающих
+        # подов: ConfigMap и Secret подключены переменными окружения, а они
+        # читаются один раз при старте процесса. Изменение суммы меняет
+        # шаблон пода и запускает обычный перевыкат.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "gophprofile.podSecurityContext" . | nindent 8 }}
+      # Запас поверх drainDelay и shutdownTimeout: под должен успеть закрыться
+      # сам, иначе его добьёт SIGKILL посреди обработки запроса.
+      terminationGracePeriodSeconds: {{ .Values.server.terminationGracePeriodSeconds }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: {{ include "gophprofile.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "gophprofile.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Метрики и пробы. Service отдаёт его отдельным портом, Ingress
+            # на него не смотрит: в метках метрик внутреннее устройство сервиса.
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.configMapName" . }}
+          env:
+            {{- include "gophprofile.secretEnv" . | nindent 12 }}
+          # Старт ждёт подключения к базе, хранилищу и брокеру. Отдельная проба
+          # даёт запуску время, не растягивая интервал живости на всю жизнь пода:
+          # без неё пришлось бы ставить большой initialDelaySeconds у liveness
+          # и зависший под простаивал бы столько же.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: {{ .Values.server.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.server.probes.startup.failureThreshold }}
+          # Живость смотрит только на сам процесс. Состояние базы и брокера сюда
+          # не входит: перезапуск их не поднимет, а разом убьёт все исправные
+          # реплики и превратит частичный отказ в полный.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: {{ .Values.server.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.liveness.failureThreshold }}
+          # Готовность смотрит на зависимости: принимать трафик без базы
+          # и хранилища нечем. Здесь отказ правильный — под убирают
+          # из балансировки, не перезапуская.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: {{ .Values.server.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "gophprofile.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "gophprofile.tmpVolume" . | nindent 8 }}

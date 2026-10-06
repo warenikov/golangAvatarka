@@ -1,0 +1,114 @@
+# Локальный кластер: OrbStack, minikube, kind.
+#
+# Контур самодостаточный — база, хранилище и брокер едут вместе с релизом,
+# поэтому `helm install -f values-dev.yaml` поднимает всё одной командой.
+# Пароли здесь заведомо слабые и лежат открытым текстом: это учебный стенд,
+# и APP_ENV=dev снимает проверку конфига на дефолтные секреты.
+
+image:
+  # Тег локальной сборки из `make image`. Образ берётся из демона Docker,
+  # реестра в этом контуре нет — отсюда IfNotPresent.
+  tag: dev
+  pullPolicy: IfNotPresent
+
+app:
+  env: dev
+  logLevel: debug
+  # Короче боевых 15 с, но не короче окна обнаружения: оркестратор помечает
+  # под неготовым только после periodSeconds × failureThreshold, то есть через
+  # 6 с при настройках проб по умолчанию. Двух секунд, как было, не хватало —
+  # слушатель закрывался, пока под ещё числился готовым.
+  drainDelay: 8s
+  corsOrigins: "http://avatars.local,http://127.0.0.1:8080"
+  # Диапазон подов k3s и OrbStack. Запросы приходят от пода ingress-контроллера,
+  # и без этого адресом клиента был бы он один на весь стенд.
+  trustedProxyCIDRs: "10.42.0.0/16,192.168.194.0/24"
+
+server:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 384Mi
+  # На одноузловом стенде выселять некуда, а бюджет мешает `kubectl drain`
+  # и обновлению кластера.
+  podDisruptionBudget:
+    enabled: false
+
+worker:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 384Mi
+  podDisruptionBudget:
+    enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  host: avatars.local
+
+autoscaling:
+  server:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    # Ниже боевых 70%: на стенде нагрузку создают руками, и при высоком пороге
+    # масштабирование просто не увидеть.
+    targetCPUUtilizationPercentage: 50
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        # Минута вместо пяти: иначе демонстрация сворачивания превращается
+        # в ожидание.
+        stabilizationWindowSeconds: 60
+        policies:
+          - type: Percent
+            value: 50
+            periodSeconds: 30
+  worker:
+    enabled: false
+
+migrations:
+  # База поднимается тем же релизом, а pre-хуки выполняются раньше всех
+  # обычных ресурсов чарта — ждать в pre-фазе было бы нечего.
+  hook: "post-install,post-upgrade"
+
+# Всё окружение внутри кластера.
+postgresql:
+  enabled: true
+
+minio:
+  enabled: true
+
+rabbitmq:
+  enabled: true
+  auth:
+    username: guest
+    password: guest
+
+database:
+  user: avatars
+  name: avatars
+
+s3:
+  bucket: avatars
+
+tracing:
+  enabled: false
+
+secrets:
+  dbPassword: avatars
+  s3AccessKey: minioadmin
+  s3SecretKey: minioadmin

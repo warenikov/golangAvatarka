@@ -7,10 +7,14 @@ MOCKERY     := go run github.com/vektra/mockery/v3@v3.7.0
 GOSEC       := go run github.com/securego/gosec/v2/cmd/gosec@latest
 GOVULN      := go run golang.org/x/vuln/cmd/govulncheck@latest
 MIGRATIONS  := ./migrations
+CHART       := deploy/helm/gophprofile
+K8S_NS      ?= gophprofile
+K8S_RELEASE ?= gp
+K8S_VALUES  ?= $(CHART)/values-dev.yaml
 DB_DSN      ?= postgres://avatars:avatars@localhost:5432/avatars?sslmode=disable
 
 .DEFAULT_GOAL := help
-.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks sec test up-obs logs-obs test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check
+.PHONY: help run-server run-worker build up up-all down down-v logs ps image lint lint-fix fmt tidy mocks sec test up-obs logs-obs test-short cover cover-html migrate-up migrate-down migrate-status migrate-new check k8s-lint k8s-render k8s-deploy k8s-status k8s-logs k8s-delete
 
 help: ## Показать список команд
 	grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -100,6 +104,42 @@ cover-html: cover ## Покрытие в браузере
 	open coverage.html
 
 check: lint test ## Всё перед коммитом: линт + тесты
+
+## --- Kubernetes ---
+
+k8s-lint: ## Проверить чарт на всех наборах values
+	helm lint $(CHART) -f $(CHART)/values-dev.yaml
+	helm lint $(CHART) -f $(CHART)/values-prod.yaml --set secrets.existingSecret=gophprofile-secrets
+	helm template $(K8S_RELEASE) $(CHART) -f $(CHART)/values-dev.yaml -n $(K8S_NS) >/dev/null
+	helm template $(K8S_RELEASE) $(CHART) -f $(CHART)/values-prod.yaml -n $(K8S_NS) \
+		--set secrets.existingSecret=gophprofile-secrets >/dev/null
+
+k8s-render: ## Развернуть чарт в плоские манифесты deploy/k8s/rendered
+	# Источник истины один — чарт. Плоские манифесты генерируются из него
+	# и коммитятся, чтобы их можно было читать и применять без Helm.
+	# Дашборд копируется сюда же: Helm читает файлы только внутри каталога
+	# чарта, и без копии он разъехался бы с версией из docker/observability.
+	cp docker/observability/grafana/dashboards/overview.json $(CHART)/dashboards/overview.json
+	rm -rf deploy/k8s/rendered
+	mkdir -p deploy/k8s/rendered
+	helm template $(K8S_RELEASE) $(CHART) -f $(CHART)/values-dev.yaml \
+		-n $(K8S_NS) --output-dir deploy/k8s/rendered
+	mv deploy/k8s/rendered/gophprofile/templates/* deploy/k8s/rendered/
+	rm -rf deploy/k8s/rendered/gophprofile
+
+k8s-deploy: ## Поставить релиз в кластер (K8S_VALUES задаёт набор значений)
+	kubectl apply -f deploy/k8s/namespace.yaml
+	helm upgrade --install $(K8S_RELEASE) $(CHART) -f $(K8S_VALUES) \
+		--namespace $(K8S_NS) --timeout 8m
+
+k8s-status: ## Состояние релиза
+	kubectl -n $(K8S_NS) get pods,hpa,ingress,svc
+
+k8s-logs: ## Логи сервера и воркера
+	kubectl -n $(K8S_NS) logs -l app.kubernetes.io/part-of=gophprofile --all-containers -f --tail=50
+
+k8s-delete: ## Удалить релиз (неймспейс и тома остаются)
+	helm uninstall $(K8S_RELEASE) --namespace $(K8S_NS)
 
 ## --- Миграции ---
 
